@@ -155,7 +155,7 @@ async function ensureAudio(){
   } catch (e) {
     try { ctx = new AudioCtx(); } catch (e2) { throw new Error('浏览器不支持 AudioContext'); }
   }
-  await ctx.audioWorklet.addModule('/static/pcm-worklet.js');
+  await ctx.audioWorklet.addModule('/static/pcm-worklet.js?v=3');
   const node = new AudioWorkletNode(ctx, 'pcm-sink');
   node.connect(ctx.destination);
   audio = { ctx, node };
@@ -230,14 +230,20 @@ $('#btnRefresh').addEventListener('click', refreshDevices);
 const WS_PROTO = location.protocol === 'https:' ? 'wss://' : 'ws://';
 let liveWs = null, liveDevice = null, audioMode = 'idle';
 function setLiveState(h){ $('#liveState').innerHTML = h; }
-function setHint(h){ $('#hint').innerHTML = h; }
+async function resumeAudio(){
+  if (!audio) return false;
+  try { if (audio.ctx.state !== 'running') await audio.ctx.resume(); } catch(e){ console.error('resume', e); }
+  return audio.ctx.state === 'running';
+}
+// 自动播放策略兜底：用户任何后续手势都尝试恢复音频上下文
+document.addEventListener('pointerdown', ()=>{ if(audio && audio.ctx.state === 'suspended') audio.ctx.resume(); }, {passive:true});
 
 async function startLive(){
   if (!curId){ alert('请先选择要监听的设备'); return; }
   stopPlayback(true); // 自动停止录音回放
   stopLive(false);
   // 音频初始化失败不应阻断连接：仍然建立 WS 推流（无扬声器播放），并给出提示
-  try { await ensureAudio(); await audio.ctx.resume().catch(()=>{}); }
+  try { await ensureAudio(); if (!(await resumeAudio())) setHint('⚠ 浏览器自动播放策略将音频挂起，请点击页面任意位置后再次尝试（或检查标签页未静音）'); }
   catch(e){ console.error('audio init', e); setHint('音频初始化失败（可能被浏览器自动播放策略拦截），将仅连接不发声'); }
   liveDevice = curId;
   audioMode = 'live';

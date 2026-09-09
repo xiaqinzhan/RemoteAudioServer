@@ -209,7 +209,7 @@
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     try { audioCtx = new AudioCtx({ sampleRate: 16000 }); }
     catch (e) { audioCtx = new AudioCtx(); }
-    await audioCtx.audioWorklet.addModule('/static/pcm-worklet.js');
+    await audioCtx.audioWorklet.addModule('/static/pcm-worklet.js?v=3');
     workletNode = new AudioWorkletNode(audioCtx, 'pcm-sink');
     workletNode.connect(audioCtx.destination);
   }
