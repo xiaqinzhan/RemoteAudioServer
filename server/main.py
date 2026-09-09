@@ -51,6 +51,9 @@ sim = sim_mod.SimulatorManager(port=PORT)
 async def _startup():
     asyncio.get_running_loop().create_task(hub.sweeper())
     log.info("remoteAudioServer starting on port %s", PORT)
+    # 自动拉起 2 台虚拟设备，保证打开页面立即可见设备卡片（无需手动点击）
+    started = sim.start_ids(["sim-101", "sim-102"])
+    log.info("auto-start simulator devices: %s", started)
 
 
 # ------------------------------------------------------------------ REST

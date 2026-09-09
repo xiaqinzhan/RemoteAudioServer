@@ -510,12 +510,12 @@
     for (const date of dates) {
       const grp = document.createElement('div');
       grp.className = 'rec-group';
-      let html = `<div class="rec-g">▸ ${escapeHtml(date)}</div>`;
+      let html = `<div class="rec-g">▸ ${esc(date)}</div>`;
       for (const f of byDate.get(date)) {
         const dur = f.duration ? fmtDur(f.duration) : '';
         const size = f.size ? (f.size / 1024).toFixed(1) + ' KB' : '·';
-        html += `<div class="rec${f.fresh ? ' new' : ''}" data-file="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">
-          <span class="fn">${escapeHtml(f.name.split('/').pop())}</span>
+        html += `<div class="rec${f.fresh ? ' new' : ''}" data-file="${esc(f.name)}" title="${esc(f.name)}">
+          <span class="fn">${esc(f.name.split('/').pop())}</span>
           <span class="meta">${dur} ${size}</span>
         </div>`;
       }
@@ -539,10 +539,10 @@
   function cardHTML(dev) {
     const online = dev.online;
     const b = [];
-    b.push(`<div class="card ${online ? '' : 'offline'}" data-id="${escapeHtml(dev.device_id)}">`);
+    b.push(`<div class="card ${online ? '' : 'offline'}" data-id="${esc(dev.device_id)}">`);
     b.push(`<div class="card-head"><span class="c-dot ${online ? 'on' : ''}"></span>`);
-    b.push(`<span class="c-id">${escapeHtml(dev.device_id)}</span>`);
-    b.push(`<span class="c-fw">FW ${escapeHtml(dev.fw || '-')}</span>`);
+    b.push(`<span class="c-id">${esc(dev.device_id)}</span>`);
+    b.push(`<span class="c-fw">FW ${esc(dev.fw || '-')}</span>`);
     b.push(`<span class="c-live"><span class="rec"></span>设备推流中</span></div>`);
     b.push(`<div class="stats">`);
     b.push(` <div class="stat stat-listen"><div class="k">监听人数</div><div class="v">${dev.listener_count || 0}</div></div>`);
@@ -627,7 +627,7 @@
       $('#sys-count').textContent = devices.size;
       $('#sys-listen').textContent = (r.devices || []).reduce((s, d) => s + (d.listener_count || 0), 0);
       renderDevices();
-    } catch (e) {}
+    } catch (e) { console.error('REFRESH_ERR', e); }
   }
 
   // ------------------------------------------------------------- simulator
