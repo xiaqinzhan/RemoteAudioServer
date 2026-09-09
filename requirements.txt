@@ -1,0 +1,5 @@
+# remoteAudioServer 依赖
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=12.0
+numpy>=1.26

@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>remoteAudioServer · 多设备音频监听台</title>
+<style>
+  :root {
+    --bg0: #0a0f1a; --bg1: #0d1420; --panel: #111a2b; --panel2: #0d1524;
+    --line: rgba(80,140,255,.14); --line-hi: rgba(80,160,255,.45);
+    --cyan: #22d3ee; --blue: #3b82f6; --amber: #f59e0b; --red: #ef4444;
+    --txt: #e6edf7; --sub: #8aa0bd; --dim: #5b6c85;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "JetBrains Mono", monospace;
+    --sans: "PingFang SC", "Microsoft YaHei", sans-serif;
+    --r: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--mono), var(--sans);
+    color: var(--txt);
+    background: radial-gradient(1200px 700px at 50% -10%, #0d1a2e 0%, var(--bg0) 45%, var(--bg1) 100%);
+    min-height: 100vh;
+  }
+  a { color: var(--cyan); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 22px 20px 60px; }
+
+  header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 16px; border-bottom: 1px solid var(--line); gap: 12px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand .logo { width: 40px; height: 40px; border-radius: var(--r); background: linear-gradient(135deg, var(--cyan), var(--blue)); display: grid; place-items: center; font-weight: 800; color: #06121f; font-size: 18px; box-shadow: 0 0 22px rgba(34,211,238,.35); }
+  .brand h1 { font-size: 20px; letter-spacing: .5px; font-weight: 700; }
+  .brand small { display: block; color: var(--dim); font-size: 11px; letter-spacing: 2px; }
+  .sysline { display: flex; align-items: center; gap: 16px; color: var(--sub); font-size: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: #3a4a63; }
+  .dot.on { background: var(--cyan); box-shadow: 0 0 8px var(--cyan); animation: pulse 2.2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  .simbar { margin-top: 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r); background: linear-gradient(180deg, rgba(18,28,46,.6), rgba(13,21,36,.6)); }
+  .simbar .title { color: var(--sub); font-size: 12px; letter-spacing: 2px; margin-bottom: 10px; text-transform: uppercase; }
+  .simbar .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; color: var(--sub); }
+  .chip .state { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+  .chip.running .state { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+
+  button { font-family: inherit; font-size: 13px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: rgba(34,211,238,.08); color: var(--cyan); cursor: pointer; transition: all .18s ease; letter-spacing:.3px; }
+  button:hover { border-color: var(--line-hi); background: rgba(34,211,238,.16); transform: translateY(-1px); }
+  button:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+  button.ghost { background: transparent; color: var(--sub); }
+  button.ghost:hover { color: var(--txt); }
+  button.amber { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.1); color: var(--amber); }
+  button.amber:hover { background: rgba(245,158,11,.2); }
+  button.red { border-color: rgba(239,68,68,.4); background: rgba(239,68,68,.1); color: var(--red); }
+  button.red:hover { background: rgba(239,68,68,.2); }
+  button.sm { padding: 4px 10px; font-size: 12px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-top: 20px; }
+  .card { background: linear-gradient(180deg, var(--panel), var(--panel2)); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; transition: transform .18s ease, border-color .18s ease; }
+  .card:hover { transform: translateY(-2px); border-color: var(--line-hi); }
+  .card.offline { opacity: .72; }
+  .card-head { display: flex; align-items: center; gap: 10px; }
+  .c-dot { width: 10px; height: 10px; border-radius: 50%; background: #3a4a63; flex: none; }
+  .c-dot.on { background: var(--cyan); box-shadow: 0 0 9px var(--cyan); animation: pulse 2.2s infinite; }
+  .c-id { font-weight: 700; font-size: 15px; }
+  .c-fw { color: var(--dim); font-size: 11px; margin-left: auto; }
+  .c-live { margin-left: auto; font-size: 11px; color: var(--amber); display: none; letter-spacing: 1px; }
+  .c-live.on { display: inline-flex; align-items: center; gap: 6px; }
+  .c-live .rec { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); animation: pulse 1.2s infinite; }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin: 12px 0; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: rgba(10,15,26,.5); }
+  .stat .k { color: var(--dim); font-size: 10px; letter-spacing: 1px; }
+  .stat .v { font-size: 14px; margin-top: 3px; color: var(--txt); white-space: nowrap; }
+  .stat .v.ok { color: var(--cyan); }
+
+  .meter { height: 8px; border-radius: 4px; background: rgba(20,32,52,.8); overflow: hidden; border: 1px solid var(--line); }
+  .meter .fill { height: 100%; width: 0%; background: linear-gradient(90deg, #34d399, var(--cyan), var(--amber)); transition: width .1s linear; }
+  .meter-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .meter-row .tag { color: var(--dim); font-size: 10px; min-width: 34px; }
+
+  .ops { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .rec-toggle { position: relative; width: 40px; height: 20px; border-radius: 10px; background: #1a2639; border: 1px solid var(--line); cursor: pointer; transition: background .18s; flex: none; }
+  .rec-toggle .knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #5b6c85; transition: all .18s; }
+  .rec-toggle.on { background: rgba(245,158,11,.35); }
+  .rec-toggle.on .knob { left: 22px; background: var(--amber); }
+  .rec-label { font-size: 11px; color: var(--sub); }
+
+  .recbox { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .recbox .h { display: flex; align-items: center; gap: 8px; color: var(--sub); font-size: 12px; margin-bottom: 8px; }
+  .recbox .h .sp { cursor: pointer; color: var(--cyan); }
+  .rec-groups { max-height: 260px; overflow: auto; }
+  .rec-group { margin-bottom: 8px; }
+  .rec-g { color: var(--dim); font-size: 11px; letter-spacing: 1px; padding: 4px 2px; }
+  .rec { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font-size: 12px; }
+  .rec:hover { background: rgba(34,211,238,.06); border-color: var(--line); }
+  .rec .fn { flex: 1; color: var(--txt); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rec .meta { color: var(--dim); font-size: 11px; white-space: nowrap; }
+  .rec.playing { border-color: var(--cyan); background: rgba(34,211,238,.08); }
+  .rec.new { animation: flashnew 1.6s ease; }
+  @keyframes flashnew { 0%{ background: rgba(34,211,238,.28);} 100%{ background: transparent; } }
+
+  .player { position: fixed; right: 20px; bottom: 20px; width: 340px; border: 1px solid var(--line-hi); border-radius: var(--r); padding: 12px; background: rgba(13,22,38,.92); box-shadow: 0 10px 40px rgba(0,0,0,.5); z-index: 40; }
+  .player audio { width: 100%; height: 34px; }
+  .player .pf { margin-top: 6px; }
+  .pbar { height: 4px; background: rgba(20,32,52,.8); border-radius: 2px; overflow: hidden; }
+  .pbar .pf { height: 100%; width: 0%; background: linear-gradient(90deg, var(--cyan), var(--blue)); }
+  .player .ptime { color: var(--dim); font-size: 10px; margin-top: 4px; }
+
+  .empty { text-align: center; padding: 70px 20px; color: var(--dim); }
+  .empty .big { font-size: 44px; opacity: .4; margin-bottom: 12px; }
+  .empty p { line-height: 1.8; font-size: 13px; }
+
+  .toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px); background: #142038; border: 1px solid var(--line-hi); color: var(--txt); padding: 10px 18px; border-radius: 8px; font-size: 13px; opacity: 0; transition: all .25s; z-index: 50; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.err { border-color: rgba(239,68,68,.5); }
+
+  footer { margin-top: 34px; color: var(--dim); font-size: 11px; text-align: center; letter-spacing: 1px; line-height: 1.8; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #1c2b44; border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">▤</div>
+      <div>
+        <h1>remoteAudioServer</h1>
+        <small>REMOTE AUDIO ACQUISITION · MONITOR CONSOLE</small>
+      </div>
+    </div>
+    <div class="sysline">
+      <span><span class="dot on" id="sys-dot"></span> 服务在线</span>
+      <span>设备 <b id="sys-count" style="color:var(--txt)">0</b> 台</span>
+      <span>监听 <b id="sys-listen" style="color:var(--txt)">0</b> 人</span>
+    </div>
+  </header>
+
+  <section class="simbar">
+    <div class="title">▸ 设备模拟器（无需硬件）</div>
+    <div class="row">
+      <button id="btn-sim-2">启动 2 台模拟设备</button>
+      <button id="btn-sim-3" class="ghost">启动第 3 台</button>
+      <button id="btn-sim-alloff" class="red">全部断开</button>
+      <span style="color:var(--dim);font-size:11px">模拟设备以真实 WebSocket 客户端接入系统协议，可完整演示采集 / 监听 / 回放全链路。</span>
+    </div>
+    <div class="chips" id="sim-chips"></div>
+  </section>
+
+  <div id="dev-area">
+    <div class="empty" id="empty">
+      <div class="big">◉</div>
+      <p>暂无在线设备。<br/>点击上方「启动 2 台模拟设备」，随后在设备卡片上「开始监听」即可听到合成的提示音。<br/>也可以展开「录音文件」浏览并回放虚拟录音。</p>
+    </div>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <footer>
+    ESP32 · WebSocket 路由中枢 · AudioWorklet 实时播放<br/>
+    协议：实时帧 0x01 广播 / 文件块 0x02 按 req_id 路由 · 深色监控台主题
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  // ---------------------------------------------------------------- utils
+  const $ = (s) => document.querySelector(s);
+  const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const api = (p, opts) => fetch(p, opts).then(r => r.json());
+  const J = { 'Content-Type': 'application/json' };
+  let reqSeq = 0;
+  const nextReqId = () => ++reqSeq;
+
+  const toastEl = $('#toast');
+  let toastTimer = null;
+  function toast(msg, isErr) {
+    toastEl.textContent = msg;
+    toastEl.className = 'toast show' + (isErr ? ' err' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.className = 'toast', 2600);
+  }
+  function fmtDur(s) {
+    s = Math.round(s || 0);
+    const m = Math.floor(s / 60), x = s % 60;
+    return (m ? m + ' 分 ' : '') + x + ' 秒';
+  }
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // ---------------------------------------------------------------- state
+  const devices = new Map();
+  const simRun = new Set();
+  const workbooks = new Map();          // device_id -> {list, open}
+
+  const active = { ws: null, deviceId: null, mode: null };   // mode: 'live' | 'file'
+  let audioCtx = null, workletNode = null;
+  let meterRaf = null, meterVal = 0;
+  let pendingFile = null;               // {deviceId, reqId, chunks:Map, blobUrl, name}
+
+  // ------------------------------------------------------------- audio
+  async function ensureAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await audioCtx.audioWorklet.addModule('/static/pcm-worklet.js');
+    workletNode = new AudioWorkletNode(audioCtx, 'pcm-sink');
+    workletNode.connect(audioCtx.destination);
+  }
+  function stopMeter() {
+    meterVal = 0;
+    if (meterRaf) { cancelAnimationFrame(meterRaf); meterRaf = null; }
+    const card = cardOf(active.deviceId);
+    if (card) fillOf(card).style.width = '0%';
+  }
+
+  // ---------------------------------------------------------- card helpers
+  const cardOf = (id) => document.querySelector(`.card[data-id="${id}"]`);
+  const fillOf = (card) => card && card.querySelector('.meter .fill');
+  function isMeLive() { return active.deviceId != null && active.mode === 'live'; }
+  function syncCard(card) {
+    const id = card.dataset.id;
+    const meLive = active.deviceId === id && active.mode === 'live';
+    const btnLive = card.querySelector('.js-listen');
+    const btnStop = card.querySelector('.js-stop');
+    if (btnLive) btnLive.style.display = meLive ? 'none' : '';
+    if (btnStop) btnStop.style.display = meLive ? '' : 'none';
+    const lm = card.querySelector('.c-live');
+    if (lm) lm.classList.toggle('on', meLive);
+  }
+
+  // ---------------------------------------------------------------- ws
+  function closeWs() {
+    if (active.ws) { try { active.ws.onclose = null; active.ws.close(); } catch (e) {} }
+    active.ws = null;
+  }
+  function openListenWs(deviceId) {
+    closeWs();
+    let ws;
+    try { ws = new WebSocket(wsProto + location.host + '/ws/listen/' + deviceId); }
+    catch (e) { return null; }
+    ws.binaryType = 'arraybuffer';
+    active.ws = ws;
+    active.deviceId = deviceId;
+    const me = ws;
+    ws.onopen = () => { if (active.ws === me && active.mode === 'live') startLiveClock(); };
+    ws.onmessage = (ev) => {
+      if (active.ws !== me) return;
+      if (typeof ev.data === 'string') onWsText(deviceId, ev.data);
+      else onWsBinary(deviceId, ev.data);
+    };
+    ws.onclose = () => {
+      if (active.ws !== me) return;
+      const wasLive = active.mode === 'live';
+      active.ws = null; active.mode = null;
+      stopMeter();
+      const card = cardOf(deviceId);
+      if (card) { syncCard(card); setListenCount(card, devices.get(deviceId)?.listener_count || 0); }
+      if (wasLive) toast('监听连接已断开');
+    };
+    ws.onerror = () => {};
+    return ws;
+  }
+
+  function onWsText(deviceId, text) {
+    let d;
+    try { d = JSON.parse(text); } catch (e) { return; }
+    if (d.type !== 'event') return;
+    if (d.event === 'recording_saved') {
+      const wb = workbooks.get(deviceId);
+      if (wb && wb.open) {
+        wb.list.unshift({ name: d.file, date: d.date, size: 0, duration: d.duration || 0, fresh: true });
+        renderRecordings(deviceId);
+      }
+    } else if (d.event === 'request_failed') {
+      toast(d.msg || '请求失败', true);
+    }
+  }
+
+  function onWsBinary(deviceId, buf) {
+    if (buf.byteLength < 7) return;
+    const dv = new DataView(buf);
+    const type = dv.getUint8(0);
+    const reqId = dv.getUint32(1, false);
+    const seq = dv.getUint16(5, false);
+    const payload = buf.slice(7);
+    if (type === 1 && active.deviceId === deviceId && active.mode === 'live' && workletNode) {
+      const f = decodeInt16(payload);
+      workletNode.port.postMessage(f, [f.buffer]);
+    } else if (type === 2 && active.mode === 'file' && pendingFile && pendingFile.reqId === reqId) {
+      pendingFile.chunks.set(seq, payload);
+      if (seq === 0xFFFF) finishFile(pendingFile);
+    }
+  }
+
+  function decodeInt16(buf) {
+    const f = new Float32Array(buf.byteLength / 2);
+    const dv = new DataView(buf);
+    let sum = 0;
+    for (let i = 0; i < f.length; i++) {
+      const v = dv.getInt16(i * 2, true) / 32768;
+      f[i] = v; sum += v * v;
+    }
+    meterVal = Math.min(1, Math.sqrt(sum / f.length));
+    return f;
+  }
+
+  function startLiveClock() {
+    const card = cardOf(active.deviceId);
+    if (card) syncCard(card);
+    if (!meterRaf) {
+      const tick = () => {
+        const c = cardOf(active.deviceId);
+        const fl = fillOf(c);
+        if (fl) fl.style.width = (meterVal * 100).toFixed(1) + '%';
+        meterRaf = requestAnimationFrame(tick);
+      };
+      meterRaf = requestAnimationFrame(tick);
+    }
+  }
+
+  // ------------------------------------------------------------- listening
+  function startListen(deviceId) {
+    stopPlayback();
+    closeWs();
+    active.mode = 'live';
+    ensureAudio().then(() => audioCtx.resume()).then(() => {
+      const ws = openListenWs(deviceId);
+      if (!ws) { active.mode = null; return; }
+    }).catch(e => toast('音频初始化失败: ' + e.message, true));
+  }
+  function stopListen() {
+    stopPlayback();
+    closeWs();
+    active.mode = null;
+  }
+
+  // ------------------------------------------------------------- playback
+  function playFile(deviceId, file) {
+    if (!devices.has(deviceId)) return;
+    stopPlayback();
+    closeWs();
+    active.mode = 'file';
+    const reqId = nextReqId();
+    pendingFile = {
+      deviceId, reqId,
+      chunks: new Map(),
+      name: (file.name || '').split('/').pop() || file.name,
+      blobUrl: null,
+    };
+    const ws = openListenWs(deviceId);
+    if (!ws) { active.mode = null; pendingFile = null; return; }
+    setTimeout(() => {
+      if (active.ws === ws && active.mode === 'file') {
+        ws.send(JSON.stringify({ type: 'request', req_id: reqId, cmd: 'play_file', file: file.name }));
+      }
+    }, 120);
+  }
+
+  function finishFile(pf) {
+    const keys = Array.from(pf.chunks.keys()).sort((a, b) => a - b);
+    const parts = keys.map(k => pf.chunks.get(k));
+    const blob = new Blob(parts, { type: 'audio/ogg' });
+    pf.blobUrl = URL.createObjectURL(blob);
+    showPlayer(pf);
+    const card = cardOf(pf.deviceId);
+    if (card) {
+      card.querySelectorAll('.rec').forEach(r => r.classList.remove('playing'));
+      card.querySelector(`.rec[data-file]`)?.classList.add('playing');
+    }
+    toast('录音回放开始：' + pf.name);
+  }
+
+  function stopPlayback() {
+    const pf = pendingFile;
+    if (pf) {
+      if (active.ws && active.ws.readyState === 1 && active.mode === 'file') {
+        try {
+          active.ws.send(JSON.stringify({
+            type: 'request', req_id: nextReqId(), cmd: 'stop_file', req_ref: pf.reqId
+          }));
+        } catch (e) {}
+      }
+      if (pf.blobUrl) URL.revokeObjectURL(pf.blobUrl);
+      pendingFile = null;
+      const card = cardOf(pf.deviceId);
+      if (card) card.querySelectorAll('.rec').forEach(r => r.classList.remove('playing'));
+    }
+    hidePlayer();
+  }
+
+  function showPlayer(pf) {
+    const p = document.querySelector('#player-box');
+    if (!p) {
+      const d = document.createElement('div');
+      d.id = 'player-box';
+      d.className = 'player';
+      d.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span class="fn" style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--cyan)"></span>
+          <button class="sm ghost js-pause">暂停</button>
+          <button class="sm red js-stop">停止</button>
+        </div>
+        <div style="display:none"><audio></audio></div>
+        <audio controls></audio>
+        <div class="pbar"><div class="pf"></div></div>
+        <div class="ptime">0:00 / 0:00</div>`;
+      document.body.appendChild(d);
+      const au = d.querySelector('audio');
+      function fmtCur(x){ const m=Math.floor(x/60); return m+':'+String(Math.floor(x%60)).padStart(2,'0'); }
+      au.ontimeupdate = () => {
+        d.querySelector('.pf').style.width = au.duration ? (au.currentTime/au.duration*100).toFixed(1)+'%' : '0%';
+        d.querySelector('.ptime').textContent = fmtCur(au.currentTime) + ' / ' + fmtCur(au.duration || 0);
+      };
+      d.querySelector('.js-pause').onclick = () => {
+        const pausing = !au.paused; pausing ? au.pause() : au.play();
+        d.querySelector('.js-pause').textContent = pausing ? '继续' : '暂停';
+      };
+      d.querySelector('.js-stop').onclick = () => stopPlayback();
+      window.__player = { d, au };
+    }
+    const { d, au } = window.__player;
+    d.querySelector('.fn').textContent = '▶ ' + pf.name;
+    au.src = pf.blobUrl;
+    au.play().catch(() => {});
+  }
+  function hidePlayer() {
+    const x = window.__player;
+    if (x) { x.au.pause(); x.au.src = ''; x.au.removeAttribute('src'); }
+  }
+
+  // ------------------------------------------------------------- requests
+  function requireWs(deviceId) {
+    if (active.ws && active.ws.readyState === 1) return active.ws;
+    closeWs(); active.mode = 'file';
+    return openListenWs(deviceId);
+  }
+  function setRecording(deviceId, enabled) {
+    const ws = requireWs(deviceId);
+    if (!ws) { toast('设备不在线', true); return; }
+    setTimeout(() => {
+      if (ws && ws.readyState === 1)
+        ws.send(JSON.stringify({ type: 'request', req_id: nextReqId(), cmd: 'set_recording', enabled }));
+    }, 100);
+    // 乐观更新
+    const dev = devices.get(deviceId);
+    if (dev) dev.recording_enabled = enabled;
+    const card = cardOf(deviceId);
+    if (card) toggleRecSwitch(card, enabled);
+  }
+  function toggleRecSwitch(card, on) {
+    const t = card.querySelector('.rec-toggle');
+    const l = card.querySelector('.rec-label');
+    if (t) t.classList.toggle('on', on);
+    if (l) l.textContent = on ? '录音开' : '录音关';
+  }
+
+  function loadRecordings(deviceId) {
+    const card = cardOf(deviceId);
+    if (!card) return;
+    const groups = card.querySelector('.rec-groups');
+    const openBtn = card.querySelector('.js-rec-open');
+    if (!workbooks.has(deviceId)) workbooks.set(deviceId, { list: [], open: true });
+    const wb = workbooks.get(deviceId);
+    wb.open = true;
+    groups.style.display = '';
+    openBtn.textContent = '加载中…';
+    const ws = requireWs(deviceId);
+    if (!ws) { openBtn.textContent = '列表'; return; }
+    const reqId = nextReqId();
+    const handler = (ev) => {
+      if (typeof ev.data !== 'string') return;
+      let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (d.type === 'response' && d.ok && Array.isArray(d.files)) {
+        wb.list = d.files.map(f => ({ ...f, fresh: false }));
+        ws.removeEventListener('message', handler);
+        renderRecordings(deviceId);
+        openBtn.textContent = '收起';
+      } else if (d.type === 'event') {
+        onWsText(deviceId, ev.data);
+        openBtn.textContent = '收起';
+      }
+    };
+    ws.addEventListener('message', handler);
+    setTimeout(() => { if (active.ws === ws) ws.send(JSON.stringify({ type: 'request', req_id: reqId, cmd: 'list_recordings' })); }, 120);
+  }
+
+  function toggleRecPanel(card) {
+    const id = card.dataset.id;
+    const groups = card.querySelector('.rec-groups');
+    const openBtn = card.querySelector('.js-rec-open');
+    if (groups.style.display === 'none') loadRecordings(id);
+    else { groups.style.display = 'none'; openBtn.textContent = '列表'; }
+  }
+
+  function renderRecordings(deviceId) {
+    const card = cardOf(deviceId);
+    const wb = workbooks.get(deviceId);
+    if (!card || !wb) return;
+    const groups = card.querySelector('.rec-groups');
+    const byDate = new Map();
+    for (const f of wb.list) {
+      const date = f.date || (f.name.split('/')[0]) || '';
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date).push(f);
+    }
+    const dates = Array.from(byDate.keys()).sort((a, b) => b.localeCompare(a));
+    groups.innerHTML = '';
+    for (const date of dates) {
+      const grp = document.createElement('div');
+      grp.className = 'rec-group';
+      let html = `<div class="rec-g">▸ ${escapeHtml(date)}</div>`;
+      for (const f of byDate.get(date)) {
+        const dur = f.duration ? fmtDur(f.duration) : '';
+        const size = f.size ? (f.size / 1024).toFixed(1) + ' KB' : '·';
+        html += `<div class="rec${f.fresh ? ' new' : ''}" data-file="${escapeHtml(f.name)}" title="${escapeHtml(f.name)}">
+          <span class="fn">${escapeHtml(f.name.split('/').pop())}</span>
+          <span class="meta">${dur} ${size}</span>
+        </div>`;
+      }
+      grp.innerHTML = html;
+      groups.appendChild(grp);
+    }
+    groups.querySelectorAll('.rec').forEach(row => {
+      row.addEventListener('click', () => {
+        const file = { name: row.dataset.file };
+        playFile(deviceId, file);
+      });
+    });
+  }
+
+  // ------------------------------------------------------------- rendering
+  function setListenCount(card, n) {
+    const el = card.querySelector('.stat-listen .v');
+    if (el) el.textContent = n != null ? n : 0;
+  }
+
+  function cardHTML(dev) {
+    const online = dev.online;
+    const b = [];
+    b.push(`<div class="card ${online ? '' : 'offline'}" data-id="${escapeHtml(dev.device_id)}">`);
+    b.push(`<div class="card-head"><span class="c-dot ${online ? 'on' : ''}"></span>`);
+    b.push(`<span class="c-id">${escapeHtml(dev.device_id)}</span>`);
+    b.push(`<span class="c-fw">FW ${escapeHtml(dev.fw || '-')}</span>`);
+    b.push(`<span class="c-live"><span class="rec"></span>设备推流中</span></div>`);
+    b.push(`<div class="stats">`);
+    b.push(` <div class="stat stat-listen"><div class="k">监听人数</div><div class="v">${dev.listener_count || 0}</div></div>`);
+    b.push(` <div class="stat"><div class="k">音频流</div><div class="v ${online ? 'ok' : ''}">${online ? 'PCM 16k' : '离线'}</div></div>`);
+    b.push(` <div class="stat"><div class="k">SD 卡</div><div class="v">${online ? (dev.sd_ok ? '正常' : '异常') : '—'}</div></div>`);
+    b.push(`</div>`);
+    b.push(`<div class="meter-row"><span class="tag">电平</span><div class="meter" style="flex:1"><div class="fill"></div></div></div>`);
+    b.push(`<div class="ops">`);
+    b.push(` <button class="js-listen" ${online ? '' : 'disabled'}>▶ 开始监听</button>`);
+    b.push(` <button class="js-stop red sm" style="display:none">■ 停止</button>`);
+    b.push(` <div class="rec-toggle ${dev.recording_enabled ? 'on' : ''}" title="录音开关"><span class="knob"></span></div>`);
+    b.push(` <span class="rec-label">${dev.recording_enabled ? '录音开' : '录音关'}</span>`);
+    b.push(`</div>`);
+    b.push(`<div class="recbox">`);
+    b.push(` <div class="h"><span>录音文件</span><span class="sp js-rec-open" style="visibility:hidden">列表</span></div>`);
+    b.push(` <div class="rec-groups" style="display:none"></div>`);
+    b.push(`</div>`);
+    b.push(`</div>`);
+    return b.join('');
+  }
+
+  function bindCard(card) {
+    const id = card.dataset.id;
+    card.querySelector('.js-listen').addEventListener('click', () => startListen(id));
+    card.querySelector('.js-stop').addEventListener('click', () => { stopListen(); });
+    card.querySelector('.rec-toggle').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const dev = devices.get(id);
+      if (!dev || !dev.online) return;
+      setRecording(id, !dev.recording_enabled);
+    });
+    const openBtn = card.querySelector('.js-rec-open');
+    openBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleRecPanel(card);
+    });
+  }
+
+  function renderDevices() {
+    const grid = $('#grid');
+    const empty = $('#empty');
+    if (devices.size === 0) {
+      empty.style.display = '';
+      grid.style.display = 'none';
+      return;
+    }
+    grid.style.display = 'grid';
+    empty.style.display = 'none';
+    const want = new Set(devices.keys());
+    grid.querySelectorAll('.card').forEach(c => {
+      if (!want.has(c.dataset.id)) c.remove();
+    });
+    for (const [id, dev] of devices) {
+      let card = grid.querySelector(`.card[data-id="${id}"]`);
+      if (!card) { card = document.createElement('div'); card.innerHTML = cardHTML(dev); card = card.firstElementChild; bindCard(card); grid.appendChild(card); }
+      updateCard(card, dev);
+    }
+  }
+
+  function updateCard(card, dev) {
+    const online = dev.online;
+    card.classList.toggle('offline', !online);
+    card.querySelector('.c-dot').className = 'c-dot ' + (online ? 'on' : '');
+    card.querySelector('.c-fw').textContent = 'FW ' + (dev.fw || '-');
+    setListenCount(card, dev.listener_count || 0);
+    card.querySelector('.stat .v.ok') && (card.querySelector('.stats .stat:nth-child(2) .v').textContent = online ? 'PCM 16k' : '离线');
+    const sv = card.querySelector('.stat:nth-child(3) .v');
+    sv.textContent = online ? (dev.sd_ok ? '正常' : '异常') : '—';
+    const btn = card.querySelector('.js-listen');
+    if (btn) btn.disabled = !online;
+    toggleRecSwitch(card, !!dev.recording_enabled);
+    syncCard(card);
+  }
+
+  // ---------------------------------------------------------------- polling
+  async function refresh() {
+    try {
+      const r = await api('/api/devices');
+      const onlineIds = new Set((r.devices || []).map(d => d.device_id));
+      r.devices.forEach(d => devices.set(d.device_id, { ...d, online: true }));
+      devices.forEach((v, k) => { if (!onlineIds.has(k)) v.online = false; });
+      $('#sys-count').textContent = devices.size;
+      $('#sys-listen').textContent = (r.devices || []).reduce((s, d) => s + (d.listener_count || 0), 0);
+      renderDevices();
+    } catch (e) {}
+  }
+
+  // ------------------------------------------------------------- simulator
+  const DEFS = [
+    { id: 'sim-101', label: 'sim-101' },
+    { id: 'sim-102', label: 'sim-102' },
+    { id: 'sim-103', label: 'sim-103' },
+  ];
+  async function refreshSimStatus() {
+    try {
+      const r = await api('/api/simulator/status');
+      simRun.clear();
+      (r.running || []).forEach(i => simRun.add(i));
+      renderSimChips();
+    } catch (e) {}
+  }
+  function renderSimChips() {
+    const wrap = $('#sim-chips');
+    wrap.innerHTML = '';
+    for (const d of DEFS) {
+      const run = simRun.has(d.id);
+      const el = document.createElement('span');
+      el.className = 'chip' + (run ? ' running' : '');
+      const label = d.label + ' · ' + (d.id === 'sim-101' ? '880Hz' : d.id === 'sim-102' ? '660Hz' : '440Hz');
+      el.innerHTML = `<span class="state"></span><span>${label}</span>
+        <button class="sm ghost js-sim" style="padding:1px 8px;font-size:10px">${run ? '断开' : '连接'}</button>`;
+      el.querySelector('.js-sim').addEventListener('click', async () => {
+        await api('/api/simulator/' + (run ? 'disconnect' : 'connect'),
+          { method: 'POST', headers: J, body: JSON.stringify({ device_ids: [d.id] }) });
+        refreshSimStatus();
+        await refresh();
+      });
+      wrap.appendChild(el);
+    }
+  }
+  function simPost(path, body) {
+    return api('/api/simulator/' + path, { method: 'POST', headers: J, body: JSON.stringify(body || {}) });
+  }
+  $('#btn-sim-2').addEventListener('click', () => simPost('start', { device_ids: ['sim-101', 'sim-102'] }).then(refreshSimStatus).then(refresh));
+  $('#btn-sim-3').addEventListener('click', () => simPost('start', { device_ids: ['sim-103'] }).then(refreshSimStatus).then(refresh));
+  $('#btn-sim-alloff').addEventListener('click', () => simPost('disconnect', {}).then(refreshSimStatus).then(refresh));
+
+  window.addEventListener('beforeunload', () => { try { if (active.ws) active.ws.close(); } catch (e) {} });
+
+  // ---------------------------------------------------------------- boot
+  refreshSimStatus();
+  refresh();
+  setInterval(refresh, 5000);
+  setInterval(refreshSimStatus, 5000);
+})();
+</script>
+</body>
+</html>
