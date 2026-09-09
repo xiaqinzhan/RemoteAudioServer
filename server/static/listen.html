@@ -148,7 +148,13 @@ const reqId = () => nextReq++;
 let audio = null;
 async function ensureAudio(){
   if (audio) return audio;
-  const ctx = new (window.AudioContext||window.webkitAudioContext)();
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  let ctx;
+  try {
+    ctx = new AudioCtx({ sampleRate: 16000 });
+  } catch (e) {
+    try { ctx = new AudioCtx(); } catch (e2) { throw new Error('浏览器不支持 AudioContext'); }
+  }
   await ctx.audioWorklet.addModule('/static/pcm-worklet.js');
   const node = new AudioWorkletNode(ctx, 'pcm-sink');
   node.connect(ctx.destination);
