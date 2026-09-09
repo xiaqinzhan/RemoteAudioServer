@@ -105,6 +105,7 @@ button:disabled{opacity:.4;cursor:not-allowed;transform:none}
     <button id="btnStopLive" class="danger" disabled>■ 停止监听</button>
     <span class="state" id="liveState">未连接</span>
   </div>
+  <div class="hint" id="hint" style="margin-top:6px"></div>
   <div class="meter">
     <span class="lbl seg" style="margin:0">电平</span>
     <div class="bar"><i id="meterFill"></i></div>
@@ -184,7 +185,7 @@ function decodePcm(buf, off){
 }
 
 /* ---------------- 设备 ---------------- */
-let devices = [], curId = null;
+let devices = [], curId = null, autoLoaded = false;
 const metaOf = id => devices.find(d => d.device_id === id);
 
 async function refreshDevices(){
@@ -205,6 +206,8 @@ async function refreshDevices(){
     if (audioMode !== 'live') showMeta();
     // 若正在监听的原设备掉线，提示
     if (liveDevice && !metaOf(liveDevice)) { setLiveState('<b style="color:var(--red)">设备已离线</b>'); }
+    // 首次拿到设备列表时，自动加载默认设备的录音
+    if (!autoLoaded && devices.length){ autoLoaded = true; loadRecordings(); }
   }catch(e){ console.error('refreshDevices', e); }
 }
 function showMeta(){
@@ -214,24 +217,34 @@ function showMeta(){
   $('#devSd').textContent = m ? (m.sd_ok ? '正常' : '异常') : '—';
   $('#devList').textContent = m ? (m.listener_count||0) : '—';
 }
-$('#devSel').addEventListener('change', e => { curId = e.target.value; showMeta(); });
+$('#devSel').addEventListener('change', e => { curId = e.target.value; showMeta(); loadRecordings(); });
 $('#btnRefresh').addEventListener('click', refreshDevices);
 
 /* ---------------- 实时监听 ---------------- */
+const WS_PROTO = location.protocol === 'https:' ? 'wss://' : 'ws://';
 let liveWs = null, liveDevice = null, audioMode = 'idle';
 function setLiveState(h){ $('#liveState').innerHTML = h; }
+function setHint(h){ $('#hint').innerHTML = h; }
 
 async function startLive(){
   if (!curId){ alert('请先选择要监听的设备'); return; }
   stopPlayback(true); // 自动停止录音回放
   stopLive(false);
-  await ensureAudio();
-  await audio.ctx.resume().catch(()=>{});
+  // 音频初始化失败不应阻断连接：仍然建立 WS 推流（无扬声器播放），并给出提示
+  try { await ensureAudio(); await audio.ctx.resume().catch(()=>{}); }
+  catch(e){ console.error('audio init', e); setHint('音频初始化失败（可能被浏览器自动播放策略拦截），将仅连接不发声'); }
   liveDevice = curId;
   audioMode = 'live';
-  const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  const url = `${wsProto}${location.host}/ws/listen/${encodeURIComponent(curId)}`;
-  const ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
+  const url = `${WS_PROTO}${location.host}/ws/listen/${encodeURIComponent(curId)}`;
+  let ws;
+  try { ws = new WebSocket(url); }
+  catch(e){
+    console.error('ws create', e);
+    setLiveState('<b style="color:var(--red)">连接创建失败：HTTPS 下必须使用 wss，请强制刷新页面</b>');
+    $('#btnLive').disabled=false; $('#btnStopLive').disabled=true;
+    return;
+  }
+  ws.binaryType = 'arraybuffer';
   liveWs = ws;
   ws.onopen = () => { setLiveState(`监听 <b>${esc(curId)}</b> 推流中`); startMeter(); };
   ws.onmessage = ev => {
@@ -239,6 +252,7 @@ async function startLive(){
     const f = hdr(ev.data);
     if (f.type === 0x01){ const fl = decodePcm(ev.data, 7); feedPcm(fl); pushMeter(rms(fl)); }
   };
+  ws.onerror = () => { setLiveState('<b style="color:var(--red)">连接失败</b>'); };
   ws.onclose = () => { if (liveWs===ws){ liveWs=null; audioMode='idle'; stopMeter(); setLiveState('已断开'); $('#btnLive').disabled=false; $('#btnStopLive').disabled=true; } };
 }
 function stopLive(update=true){
@@ -261,8 +275,7 @@ async function openRecWs(id){
   if (recWs && recDevice === id && recWs.readyState === 1) return recWs;
   if (recWs){ closeWs(recWs); recWs=null; }
   return await new Promise((resolve, reject) => {
-    const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    const ws = new WebSocket(`${wsProto}${location.host}/ws/listen/${encodeURIComponent(id)}`);
+    const ws = new WebSocket(`${WS_PROTO}${location.host}/ws/listen/${encodeURIComponent(id)}`);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { recWs=ws; recDevice=id; wireRec(ws); resolve(ws); };
     ws.onerror = () => reject(new Error('ws err'));
