@@ -62,6 +62,12 @@ async def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
+@app.get("/listen")
+async def listen_page():
+    """监听客户端：选择设备实时听音 + 历史录音回放（独立于控制台的页面）"""
+    return FileResponse(os.path.join(STATIC_DIR, "listen.html"))
+
+
 @app.get("/api/devices")
 async def api_devices():
     return {"devices": hub.device_list(), "ts": P.now_ms()}

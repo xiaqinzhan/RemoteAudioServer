@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>监听客户端 · remoteAudioServer</title>
+<style>
+:root{
+  --bg0:#0a0f1a; --bg1:#0d1420;
+  --panel:#111a2b; --line:rgba(80,140,255,.14);
+  --cyan:#22d3ee; --blue:#3b82f6; --amber:#f59e0b; --red:#ef4444;
+  --txt:#e6edf7; --sub:#8aa0bd; --dim:#5b6c85;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"JetBrains Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:radial-gradient(1200px 700px at 70% -10%,#0d1420 0%,#0a0f1a 60%);color:var(--txt);font-family:var(--mono);min-height:100%}
+body{padding:22px;max-width:960px;margin:0 auto}
+.section{background:rgba(17,26,43,.5);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:18px}
+.hd{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.hd h1{font-size:18px;letter-spacing:.3px;font-weight:600}
+.hd .tag{color:var(--dim);font-size:12px;margin-top:2px}
+.topright{margin-left:auto;display:flex;gap:10px;align-items:center}
+a.link{color:var(--cyan);text-decoration:none;font-size:13px}
+a.link:hover{text-decoration:underline}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 8px var(--red)}
+.dot.on{background:var(--cyan);box-shadow:0 0 8px var(--cyan);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.lbl{color:var(--dim);font-size:12px;margin-bottom:8px;display:flex;gap:8px;align-items:center}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+select{background:#0d1524;border:1px solid var(--line);color:var(--txt);font-family:var(--mono);font-size:13px;padding:8px 10px;border-radius:8px;min-width:220px}
+select:focus{outline:none;border-color:var(--cyan)}
+select option{background:#0d1524}
+button{background:rgba(34,211,238,.08);border:1px solid rgba(34,211,238,.35);color:var(--cyan);font-family:var(--mono);font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;transition:.18s}
+button:hover{background:rgba(34,211,238,.18);transform:translateY(-1px)}
+button.danger{border-color:rgba(239,68,68,.4);color:var(--red);background:rgba(239,68,68,.06)}
+button.danger:hover{background:rgba(239,68,68,.16)}
+button:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.hint{color:var(--dim);font-size:12px;margin-top:8px;line-height:1.7}
+/* meter / live */
+.meter{display:flex;align-items:center;gap:10px;margin-top:14px}
+.meter .seg{flex:0 0 auto}
+.bar{width:220px;height:10px;background:#0d1524;border:1px solid var(--line);border-radius:5px;overflow:hidden;position:relative}
+.bar i{position:absolute;inset:0;width:0%;background:linear-gradient(90deg,#34d399,#22d3ee,#f59e0b);transition:width .1s linear}
+.state{font-size:12px;color:var(--dim)}
+.state b{color:var(--cyan);font-weight:600}
+.statusline{display:flex;gap:14px;margin-top:10px;flex-wrap:wrap}
+.stat{color:var(--dim);font-size:12px}
+.stat .v{color:var(--sub);margin-left:4px}
+/* recordings */
+.groups{margin-top:12px}
+.group{margin-bottom:12px}
+.group .gtitle{color:var(--cyan);font-size:13px;margin-bottom:6px;display:flex;gap:8px}
+.group .gtitle::before{content:'▸';color:var(--dim)}
+.rec{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid transparent;border-radius:8px;cursor:pointer;font-size:13px;transition:.15s}
+.rec:hover{background:rgba(34,211,238,.07);border-color:var(--line)}
+.rec .nm{color:var(--txt);word-break:break-all}
+.rec .mn{margin-left:auto;color:var(--dim);font-size:12px}
+.rec.playing{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.4)}
+.empty-t{color:var(--dim);font-size:13px;padding:10px 0}
+/* player */
+.player{position:fixed;left:0;right:0;bottom:0;background:rgba(11,17,30,.92);border-top:1px solid rgba(34,211,238,.25);padding:12px 22px;display:none;align-items:center;gap:14px}
+.player.show{display:flex}
+.player .pname{font-size:12px;color:var(--sub);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.player audio{flex:1;height:34px}
+.player .ptime{font-size:12px;color:var(--dim);white-space:nowrap}
+@media(max-width:640px){.bar{width:120px}select{min-width:100%}.row>*{flex:1 1 100%}}
+</style>
+</head>
+<body>
+
+<div class="section">
+  <div class="hd">
+    <div>
+      <h1>🔍 监听客户端</h1>
+      <div class="tag">remoteAudioServer · 实时听音 / 录音回放（无鉴权演示）</div>
+    </div>
+    <div class="topright">
+      <span class="dot" id="sys-dot"></span>
+      <span class="lbl" style="margin:0"><span id="sys-online">0</span> 台在线</span>
+      <a class="link" href="/">← 返回控制台</a>
+    </div>
+  </div>
+</div>
+
+<!-- 设备选择 -->
+<div class="section">
+  <div class="lbl"><span>选择采集设备</span><span style="color:var(--dim)">（在线设备才会出现在列表中）</span></div>
+  <div class="row">
+    <select id="devSel"></select>
+    <button id="btnRefresh">刷新设备</button>
+  </div>
+  <div class="statusline">
+    <div class="stat">固件 <span class="v" id="devFw">—</span></div>
+    <div class="stat">录音开关 <span class="v" id="devRec">—</span></div>
+    <div class="stat">SD卡 <span class="v" id="devSd">—</span></div>
+    <div class="stat">监听人数 <span class="v" id="devList">—</span></div>
+  </div>
+</div>
+
+<!-- 实时监听 -->
+<div class="section">
+  <div class="lbl">实时监听（16kHz · 16bit · 单声道 PCM）</div>
+  <div class="row">
+    <button id="btnLive">▶ 开始监听</button>
+    <button id="btnStopLive" class="danger" disabled>■ 停止监听</button>
+    <span class="state" id="liveState">未连接</span>
+  </div>
+  <div class="meter">
+    <span class="lbl seg" style="margin:0">电平</span>
+    <div class="bar"><i id="meterFill"></i></div>
+    <span class="state" id="levelTxt">-120 dB</span>
+  </div>
+  <div class="hint">开始监听后，将实时播放所选设备的采集声音；同一时间仅允许一个音源（开始监听会自动停止录音回放）。</div>
+</div>
+
+<!-- 历史录音 -->
+<div class="section">
+  <div class="lbl">历史录音（按日期分组，点击条目播放）</div>
+  <div class="row">
+    <button id="btnLoad">加载录音列表</button>
+    <span class="state" id="recState">未加载</span>
+  </div>
+  <div class="groups" id="groups"></div>
+</div>
+
+<!-- 底部播放器 -->
+<div class="player" id="player">
+  <span class="pname" id="pname">—</span>
+  <audio id="audio" controls preload="metadata"></audio>
+  <span class="ptime" id="ptime">00:00 / 00:00</span>
+  <button id="btnPause" class="danger">暂停/继续</button>
+  <button id="btnStopPlay">停止并关闭</button>
+</div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const J = {'Content-Type':'application/json'};
+const api = (p,o) => fetch(p, o).then(r => r.json());
+
+const SAMPLE_RATE = 16000;
+let nextReq = 1;
+const reqId = () => nextReq++;
+
+/* ---------------- 音频（AudioWorklet） ---------------- */
+let audio = null;
+async function ensureAudio(){
+  if (audio) return audio;
+  const ctx = new (window.AudioContext||window.webkitAudioContext)();
+  await ctx.audioWorklet.addModule('/static/pcm-worklet.js');
+  const node = new AudioWorkletNode(ctx, 'pcm-sink');
+  node.connect(ctx.destination);
+  audio = { ctx, node };
+  return audio;
+}
+function feedPcm(fl){ if(audio) audio.node.port.postMessage(fl); }
+function rms(fl){ let s=0; for(let i=0;i<fl.length;i++) s+=fl[i]*fl[i]; return Math.sqrt(s/fl.length); }
+function dbFrom(r){ const v = r||0; return v<=0 ? -120 : Math.max(-120, 20*Math.log10(v)); }
+
+const meter = { running:false, raf:0, level:0 };
+function startMeter(){ meter.running=true; meter.measureRms=0; meter.samples=0; meter.tick(); }
+function stopMeter(){ meter.running=false; cancelAnimationFrame(meter.raf); $('#meterFill').style.width='0%'; $('#levelTxt').textContent='-120 dB'; }
+meter.tick = () => {
+  if(!meter.running) return;
+  const pct = Math.min(100, Math.max(0, (meter.level + 60) / 60 * 100));
+  $('#meterFill').style.width = pct + '%';
+  $('#levelTxt').textContent = (meter.level <= -60 ? '<-60' : meter.level.toFixed(0)) + ' dB';
+  meter.raf = requestAnimationFrame(meter.tick);
+};
+function pushMeter(r){ meter.level = 0.7*meter.level + 0.3*Math.min(0, dbFrom(r)); }
+
+/* ---------------- 帧解析 ---------------- */
+function hdr(buf){
+  const d = new DataView(buf,0,7);
+  return { type:d.getUint8(0), req:d.getUint32(1,false), seq:d.getUint16(5,false) };
+}
+function decodePcm(buf, off){
+  const n = (buf.byteLength - off) / 2 | 0;
+  const i16 = new Int16Array(buf, off, n);
+  const fl = new Float32Array(n);
+  for(let i=0;i<n;i++) fl[i]=i16[i]/32768;
+  return fl;
+}
+
+/* ---------------- 设备 ---------------- */
+let devices = [], curId = null;
+const metaOf = id => devices.find(d => d.device_id === id);
+
+async function refreshDevices(){
+  try{
+    const r = await api('/api/devices');
+    devices = r.devices || [];
+    const sel = $('#devSel');
+    const keep = curId && metaOf(curId);
+    const opts = devices.map(d => `<option value="${esc(d.device_id)}">${esc(d.device_id)} · ${d.online?'在线':'离线'}</option>`).join('');
+    const before = sel.value;
+    sel.innerHTML = opts;
+    if (devices.length) sel.value = keep ? curId : (devices[0].device_id);
+    else sel.value = '';
+    curId = sel.value;
+    $('#sys-online').textContent = devices.length;
+    $('#sys-dot').className = 'dot' + (devices.length ? ' on' : '');
+    // 若不处于监听中，则刷新所选设备元信息
+    if (audioMode !== 'live') showMeta();
+    // 若正在监听的原设备掉线，提示
+    if (liveDevice && !metaOf(liveDevice)) { setLiveState('<b style="color:var(--red)">设备已离线</b>'); }
+  }catch(e){ console.error('refreshDevices', e); }
+}
+function showMeta(){
+  const m = metaOf(curId);
+  $('#devFw').textContent = m ? m.fw || '—' : '—';
+  $('#devRec').textContent = m ? (m.recording_enabled ? '开' : '关') : '—';
+  $('#devSd').textContent = m ? (m.sd_ok ? '正常' : '异常') : '—';
+  $('#devList').textContent = m ? (m.listener_count||0) : '—';
+}
+$('#devSel').addEventListener('change', e => { curId = e.target.value; showMeta(); });
+$('#btnRefresh').addEventListener('click', refreshDevices);
+
+/* ---------------- 实时监听 ---------------- */
+let liveWs = null, liveDevice = null, audioMode = 'idle';
+function setLiveState(h){ $('#liveState').innerHTML = h; }
+
+async function startLive(){
+  if (!curId){ alert('请先选择要监听的设备'); return; }
+  stopPlayback(true); // 自动停止录音回放
+  stopLive(false);
+  await ensureAudio();
+  await audio.ctx.resume().catch(()=>{});
+  liveDevice = curId;
+  audioMode = 'live';
+  const url = `ws://${location.host}/ws/listen/${encodeURIComponent(curId)}`;
+  const ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
+  liveWs = ws;
+  ws.onopen = () => { setLiveState(`监听 <b>${esc(curId)}</b> 推流中`); startMeter(); };
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string'){ const m = JSON.parse(ev.data); if (m.type==='event' && m.event==='device_offline') setLiveState('<b style="color:var(--red)">设备离线</b>'); return; }
+    const f = hdr(ev.data);
+    if (f.type === 0x01){ const fl = decodePcm(ev.data, 7); feedPcm(fl); pushMeter(rms(fl)); }
+  };
+  ws.onclose = () => { if (liveWs===ws){ liveWs=null; audioMode='idle'; stopMeter(); setLiveState('已断开'); $('#btnLive').disabled=false; $('#btnStopLive').disabled=true; } };
+}
+function stopLive(update=true){
+  if (liveWs){ closeWs(liveWs); liveWs=null; liveDevice=null; }
+  if (audioMode === 'live') audioMode = 'idle';
+  stopMeter();
+  if (update){ setLiveState('未连接'); $('#btnLive').disabled=false; $('#btnStopLive').disabled=true; }
+}
+$('#btnLive').addEventListener('click', () => {
+  $('#btnLive').disabled = true; $('#btnStopLive').disabled = false;
+  startLive().catch(e => { console.error('startLive', e); setLiveState('<b style="color:var(--red)">启动失败</b>'); $('#btnLive').disabled=false; $('#btnStopLive').disabled=true; });
+});
+$('#btnStopLive').addEventListener('click', () => { stopLive(); refreshDevices(); });
+
+/* ---------------- 历史录音 ---------------- */
+let recWs = null, recDevice = null;
+function closeWs(ws){ try{ ws.onopen=ws.onmessage=ws.onclose=onerror=null; ws.close(); }catch(e){} }
+
+async function openRecWs(id){
+  if (recWs && recDevice === id && recWs.readyState === 1) return recWs;
+  if (recWs){ closeWs(recWs); recWs=null; }
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://${location.host}/ws/listen/${encodeURIComponent(id)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { recWs=ws; recDevice=id; wireRec(ws); resolve(ws); };
+    ws.onerror = () => reject(new Error('ws err'));
+    ws.onclose = () => { if (recWs===ws){ recWs=null; recDevice=null; } };
+  });
+}
+function wireRec(ws){
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string'){ handleRecJson(ws, ev.data); return; }
+    handleRecBinary(ev.data);
+  };
+}
+function handleRecJson(ws, text){
+  let m; try{ m = JSON.parse(text); }catch(e){ return; }
+  if (m.type === 'response' && Array.isArray(m.files)) renderRecordings(m.files);
+  if (m.type === 'event' && m.event === 'recording_saved') onRecordingSaved(m.file);
+}
+const pendingList = new Map(); // req_id -> {ws, id}
+async function loadRecordings(){
+  if (!curId){ alert('请先选择设备'); return; }
+  stopLive(false); // 录音浏览时不实时听音
+  try{
+    const ws = await openRecWs(curId);
+    const rid = reqId();
+    pendingList.set(rid, { ws, id: curId });
+    ws.send(JSON.stringify({ type:'request', req_id:rid, cmd:'list_recordings' }));
+    $('#recState').textContent = '加载中…';
+  }catch(e){
+    console.error('loadRecordings', e);
+    $('#recState').innerHTML = '<b style="color:var(--red)">无法连接设备</b>';
+  }
+}
+$('#btnLoad').addEventListener('click', loadRecordings);
+
+function renderRecordings(files){
+  $('#recState').textContent = files.length ? `共 ${files.length} 条` : '无录音';
+  const groups = {};
+  (files||[]).slice().sort((a,b)=> (b.name||'').localeCompare(a.name||'')).forEach(f => {
+    const date = f.date || (f.name||'').split('/')[0] || '未知';
+    (groups[date] = groups[date] || []).push(f);
+  });
+  const g = $('#groups');
+  const ids = Object.keys(groups);
+  if (!ids.length){ g.innerHTML = '<div class="empty-t">该设备当前没有录音记录。</div>'; return; }
+  g.innerHTML = ids.map(date => {
+    const rows = groups[date].map(f => {
+      const dur = fmtDur(f.duration);
+      const size = fmtKb(f.size);
+      return `<div class="rec" data-file="${esc(f.name)}" data-date="${esc(f.date||date)}">
+        <span class="nm">${esc((f.name||'').split('/').pop())}</span>
+        <span class="mn">${dur} · ${size}KB</span>
+      </div>`;
+    }).join('');
+    return `<div class="group"><div class="gtitle">${esc(date)}（${groups[date].length}）</div>${rows}</div>`;
+  }).join('');
+  g.querySelectorAll('.rec').forEach(el => el.addEventListener('click', () => {
+    g.querySelectorAll('.rec.playing').forEach(x=>x.classList.remove('playing'));
+    el.classList.add('playing');
+    playRecord(recDevice||curId, el.dataset.file, el.dataset.date);
+  }));
+}
+function fmtDur(d){ if(d==null) return '—'; const m=Math.floor(d/60), s=Math.floor(d%60); return m+'分'+String(s).padStart(2,'0')+'秒'; }
+function fmtKb(k){ if(k==null) return '—'; return k<1024 ? Math.round(k) : (k/1024).toFixed(1)+'K'; }
+
+/* ---------------- 播放文件 ---------------- */
+const playState = { active:false, req:null, parts:null, bytes:0, url:null };
+function resetPlay(){ playState.active=false; playState.req=null; playState.parts=null; playState.bytes=0; if(playState.url){ URL.revokeObjectURL(playState.url); playState.url=null; } }
+function onRecordingSaved(file){ console.log('recording_saved', file); }
+
+async function playRecord(device, file, date){
+  stopLive(false); // 单一音源：停止实时监听
+  stopPlayback(false);
+  let ws;
+  try{ ws = await openRecWs(device); }catch(e){ return alert('无法连接设备'); }
+  const rid = reqId();
+  resetPlay();
+  playState.active = true; playState.req = rid; playState.parts = [];
+  $('#recState').textContent = '读取中…';
+  ws.send(JSON.stringify({ type:'request', req_id:rid, cmd:'play_file', file }));
+}
+function handleRecBinary(buf){
+  if (!playState.active) return;
+  const f = hdr(buf);
+  if (f.type !== 0x02 || f.req !== playState.req) return;
+  const body = new Uint8Array(buf, 7);
+  playState.parts.push(body);
+  playState.bytes += body.byteLength;
+  if (f.seq === 0xFFFF){ assembleOnDone(); }
+}
+function assembleOnDone(){
+  const blob = new Blob(playState.parts, { type:'audio/ogg' });
+  playState.url = URL.createObjectURL(blob);
+  const au = $('#audio');
+  au.src = playState.url;
+  $('#player').classList.add('show');
+  $('#pname').textContent = '正在播放录音';
+  $('#recState').textContent = '播放中';
+  au.play().catch(()=>{});
+  playState.active=false;
+}
+/* audio 控件进度 */
+const au = $('#audio');
+au.addEventListener('loadedmetadata', () => { $('#pname').textContent = `录音 · ${au.duration ? fmtDur(au.duration) : '—'}`; });
+au.addEventListener('timeupdate', () => { $('#ptime').textContent = (fmtClock(au.currentTime)) + ' / ' + (au.duration?fmtClock(au.duration):'--:--'); });
+au.addEventListener('ended', () => { stopPlayback(false); $('#recState').textContent='播放结束'; });
+function fmtClock(t){ if(!isFinite(t)) return '--:--'; const m=Math.floor(t/60), s=Math.floor(t%60); return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0'); }
+function stopPlayback(silent){
+  if (playState.active && recWs){
+    try{ recWs.send(JSON.stringify({ type:'request', req_id:reqId(), cmd:'stop_file', req_ref:playState.req })); }catch(e){}
+  }
+  resetPlay();
+  au.pause(); au.removeAttribute('src'); au.load();
+  $('#player').classList.remove('show');
+  if (!silent) $('#recState').textContent='已停止';
+}
+$('#btnPause').addEventListener('click', ()=>{ if(au.paused){au.play().catch(()=>{});} else au.pause(); });
+$('#btnStopPlay').addEventListener('click', ()=>{ $('#recState').textContent='已停止'; stopPlayback(false); });
+
+/* ---------------- 轮询 ---------------- */
+refreshDevices();
+setInterval(refreshDevices, 4000);
+window.addEventListener('beforeunload', ()=>{ stopLive(false); stopPlayback(true); if(recWs) closeWs(recWs); });
+</script>
+</body>
+</html>
