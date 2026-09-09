@@ -229,7 +229,8 @@ async function startLive(){
   await audio.ctx.resume().catch(()=>{});
   liveDevice = curId;
   audioMode = 'live';
-  const url = `ws://${location.host}/ws/listen/${encodeURIComponent(curId)}`;
+  const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const url = `${wsProto}${location.host}/ws/listen/${encodeURIComponent(curId)}`;
   const ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
   liveWs = ws;
   ws.onopen = () => { setLiveState(`监听 <b>${esc(curId)}</b> 推流中`); startMeter(); };
@@ -260,7 +261,8 @@ async function openRecWs(id){
   if (recWs && recDevice === id && recWs.readyState === 1) return recWs;
   if (recWs){ closeWs(recWs); recWs=null; }
   return await new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://${location.host}/ws/listen/${encodeURIComponent(id)}`);
+    const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const ws = new WebSocket(`${wsProto}${location.host}/ws/listen/${encodeURIComponent(id)}`);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { recWs=ws; recDevice=id; wireRec(ws); resolve(ws); };
     ws.onerror = () => reject(new Error('ws err'));
