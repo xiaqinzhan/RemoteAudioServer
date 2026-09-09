@@ -139,6 +139,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const J = {'Content-Type':'application/json'};
 const api = (p,o) => fetch(p, o).then(r => r.json());
+function setHint(msg){ const el = $('#hint'); if(!el) return; el.textContent = msg || ''; el.classList.toggle('show', !!msg); }
 
 const SAMPLE_RATE = 16000;
 let nextReq = 1;
@@ -183,8 +184,10 @@ function hdr(buf){
   return { type:d.getUint8(0), req:d.getUint32(1,false), seq:d.getUint16(5,false) };
 }
 function decodePcm(buf, off){
-  const n = (buf.byteLength - off) / 2 | 0;
-  const i16 = new Int16Array(buf, off, n);
+  off = off || 7;
+  const payload = new Uint8Array(buf, off, buf.byteLength - off);
+  const n = payload.length >>> 1;
+  const i16 = new Int16Array(payload.buffer, 0, n);
   const fl = new Float32Array(n);
   for(let i=0;i<n;i++) fl[i]=i16[i]/32768;
   return fl;
