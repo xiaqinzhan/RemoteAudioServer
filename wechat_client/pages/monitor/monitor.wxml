@@ -1,0 +1,78 @@
+<view class="page">
+
+  <!-- 顶部标题与连接配置 -->
+  <view class="header">
+    <view class="title">音频监听台</view>
+    <view class="sub muted mono">{{serverBase}}</view>
+    <view class="server-row">
+      <input class="server-input mono" value="{{serverInput}}" bindinput="onServerInput"
+        placeholder="https://... 或 http://192.168.x.x:8000" placeholder-class="ph" />
+      <view class="btn btn-accent connect-btn" bindtap="onConnect">{{connected ? '已连接' : '连接'}}</view>
+    </view>
+  </view>
+
+  <!-- 状态条 -->
+  <view class="panel status-panel">
+    <block wx:if="{{selectedDevice}}">
+      <view class="status-line">
+        <view class="dot {{streaming ? 'dot-on' : 'dot-off'}}"></view>
+        <text class="mono" space="nbsp">{{selectedDevice.device_id}}</text>
+        <text class="pill" style="margin-left:auto;">{{streaming ? '推流中' : '空闲'}}</text>
+      </view>
+      <view class="meter-wrap">
+        <view class="meter-bar">
+          <view class="meter-fill" style="width:{{meterPercent}}%;"></view>
+        </view>
+        <text class="meter-db mono faint">{{streaming ? levelDb + ' dB' : '--'}}</text>
+      </view>
+      <view class="ctl-row">
+        <view class="btn {{streaming ? 'btn-stop' : 'btn-accent'}} ctl-btn" bindtap="onToggleLive">
+          {{streaming ? '停止监听' : '开始监听'}}
+        </view>
+        <view class="btn btn-ghost ctl-btn" bindtap="onToggleRec" wx:if="{{selectedDevice}}">
+          录音：{{selectedDevice.recording_enabled ? '开' : '关'}}
+        </view>
+      </view>
+      <view class="hint faint" wx:if="{{hint}}">{{hint}}</view>
+    </block>
+    <view class="muted" wx:else>选择下方一台在线设备开始监听</view>
+  </view>
+
+  <!-- 设备列表 -->
+  <view class="section-title muted">设备（{{devices.length}}）</view>
+  <view class="panel list-panel">
+    <view wx:if="{{devices.length === 0}}" class="faint empty">暂无设备，请先连接服务器</view>
+    <view wx:for="{{devices}}" wx:key="device_id"
+          class="dev-item {{selectedDevice.device_id === item.device_id ? 'dev-sel' : ''}}"
+          data-id="{{item.device_id}}" bindtap="onSelectDevice">
+      <view class="dot {{item.online ? 'dot-on' : 'dot-off'}}"></view>
+      <view class="dev-main">
+        <view class="mono dev-id">{{item.device_id}}</view>
+        <view class="faint dev-meta mono">fw {{item.fw}} · 监听 {{item.listener_count}} · SD {{item.sd_ok ? 'OK' : 'ERR'}}</view>
+      </view>
+      <view class="pill" wx:if="{{!item.online}}">离线</view>
+      <view class="pill rec-pill" wx:elif="{{item.recording_enabled}}">录音开</view>
+    </view>
+  </view>
+
+  <!-- 历史录音 -->
+  <view class="section-title muted">
+    历史录音
+    <text class="refresh" bindtap="onLoadRecordings" wx:if="{{selectedDevice}}">↻</text>
+  </view>
+  <view class="panel list-panel">
+    <view wx:if="{{!selectedDevice}}" class="faint empty">选择设备后加载录音</view>
+    <view wx:elif="{{recordings.length === 0}}" class="faint empty">该设备暂无录音</view>
+    <view wx:for="{{recordings}}" wx:key="name"
+          class="rec-item {{playingName === item.name ? 'rec-sel' : ''}}"
+          data-name="{{item.name}}" bindtap="onPlayRecording">
+      <view class="rec-main">
+        <view class="mono rec-name">{{item.name}}</view>
+        <view class="faint rec-meta mono">{{item.duration}}s · {{item.sizeKb}} KB</view>
+      </view>
+      <view class="pill">{{playingName === item.name ? (filePlaying ? '播放中' : '停止') : '播放'}}</view>
+    </view>
+  </view>
+
+  <view class="footer faint">实时 PCM · 16kHz · WebAudio 流式播放</view>
+</view>

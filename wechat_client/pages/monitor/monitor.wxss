@@ -1,0 +1,72 @@
+/* pages/monitor/monitor.wxss */
+.page { padding-bottom: 60rpx; }
+
+.header { padding: 24rpx 28rpx 4rpx 28rpx; }
+.title { font-size: 44rpx; font-weight: 700; letter-spacing: 2rpx; }
+.sub { font-size: 22rpx; margin-top: 6rpx; word-break: break-all; }
+
+.server-row { display: flex; align-items: center; margin-top: 20rpx; gap: 16rpx; }
+.server-input {
+  flex: 1;
+  background: rgba(80, 140, 255, 0.06);
+  border: 1rpx solid rgba(80, 140, 255, 0.2);
+  border-radius: 14rpx;
+  padding: 16rpx 20rpx;
+  font-size: 24rpx;
+  color: #cfe0ff;
+}
+.ph { color: #4a5a75; }
+.connect-btn { width: 160rpx; }
+
+.status-panel { margin-top: 8rpx; }
+.status-line { display: flex; align-items: center; font-size: 30rpx; }
+.status-line .pill { margin-left: auto; }
+
+.meter-wrap { display: flex; align-items: center; gap: 16rpx; margin-top: 22rpx; }
+.meter-bar {
+  flex: 1; height: 18rpx; border-radius: 999rpx;
+  background: rgba(255,255,255,0.06);
+  border: 1rpx solid rgba(80,140,255,0.18);
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e, #22d3ee 55%, #f59e0b 85%, #ef4444);
+  border-radius: 999rpx;
+  transition: width 0.08s linear;
+}
+.meter-db { width: 120rpx; text-align: right; font-size: 22rpx; }
+
+.ctl-row { display: flex; gap: 16rpx; margin-top: 24rpx; }
+.ctl-btn { flex: 1; }
+.hint { margin-top: 16rpx; font-size: 22rpx; }
+
+.section-title {
+  margin: 28rpx 28rpx 4rpx 28rpx;
+  font-size: 24rpx;
+  display: flex; align-items: center;
+}
+.refresh { margin-left: auto; color: #9fc2ff; padding: 0 10rpx; }
+
+.list-panel { padding: 8rpx 24rpx; }
+.empty { padding: 28rpx 0; text-align: center; font-size: 24rpx; }
+
+.dev-item, .rec-item {
+  display: flex; align-items: center;
+  padding: 24rpx 8rpx;
+  border-bottom: 1rpx solid rgba(80,140,255,0.1);
+}
+.dev-item:last-child, .rec-item:last-child { border-bottom: none; }
+.dev-sel, .rec-sel {
+  background: rgba(34, 211, 238, 0.07);
+  border-radius: 14rpx;
+}
+.dev-main, .rec-main { flex: 1; min-width: 0; }
+.dev-id { font-size: 28rpx; color: #e6edf7; }
+.dev-meta { font-size: 20rpx; margin-top: 6rpx; }
+.rec-pill { color: #fcd34d; border-color: rgba(245,158,11,0.4); }
+
+.rec-name { font-size: 26rpx; color: #dbe7f7; word-break: break-all; }
+.rec-meta { font-size: 20rpx; margin-top: 6rpx; }
+
+.footer { text-align: center; font-size: 20rpx; margin-top: 40rpx; }

@@ -1,0 +1,14 @@
+{
+  "pages": [
+    "pages/monitor/monitor"
+  ],
+  "window": {
+    "backgroundTextStyle": "dark",
+    "navigationBarBackgroundColor": "#0a0f1a",
+    "navigationBarTitleText": "音频监听台",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#0a0f1a"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

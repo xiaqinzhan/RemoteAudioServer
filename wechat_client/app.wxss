@@ -1,0 +1,58 @@
+/* app.wxss — 全局深色科技风样式，与 Web 监听端一致 */
+page {
+  background: radial-gradient(120% 80% at 50% -10%, #0d1420 0%, #0a0f1a 60%) fixed;
+  color: #e6edf7;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", monospace;
+  font-size: 28rpx;
+  min-height: 100vh;
+}
+
+.panel {
+  background: rgba(17, 26, 43, 0.92);
+  border: 1rpx solid rgba(80, 140, 255, 0.14);
+  border-radius: 20rpx;
+  padding: 24rpx;
+  margin: 20rpx;
+}
+
+.muted { color: #8aa0bd; }
+.faint { color: #5b6c85; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+.btn {
+  border-radius: 14rpx;
+  font-size: 28rpx;
+  padding: 16rpx 0;
+  text-align: center;
+  line-height: 1.4;
+}
+.btn-accent {
+  background: linear-gradient(135deg, #22d3ee, #3b82f6);
+  color: #04121c;
+  font-weight: 600;
+}
+.btn-stop {
+  background: rgba(239, 68, 68, 0.16);
+  border: 1rpx solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+.btn-ghost {
+  background: rgba(80, 140, 255, 0.08);
+  border: 1rpx solid rgba(80, 140, 255, 0.22);
+  color: #9fc2ff;
+}
+.btn[disabled] { opacity: 0.4; }
+
+.dot { width: 18rpx; height: 18rpx; border-radius: 50%; display: inline-block; margin-right: 12rpx; }
+.dot-on { background: #34d399; box-shadow: 0 0 12rpx rgba(52, 211, 153, 0.8); }
+.dot-off { background: #5b6c85; }
+
+.hairline { height: 1rpx; background: rgba(80, 140, 255, 0.12); margin: 16rpx 0; }
+
+.pill {
+  font-size: 20rpx;
+  padding: 4rpx 14rpx;
+  border-radius: 999rpx;
+  border: 1rpx solid rgba(80, 140, 255, 0.25);
+  color: #9fc2ff;
+}
