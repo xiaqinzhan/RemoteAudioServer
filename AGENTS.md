@@ -16,6 +16,7 @@ python3 -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 - `server/simulator.py`：设备模拟器。每台虚拟设备在独立线程的独立 asyncio 事件循环中，以真实 `websockets` 客户端连 `/ws/device/{id}`。
 - `server/main.py`：FastAPI 应用，装配 hub 与 simulator，托管 `server/static`。
 - `server/static/index.html` + `pcm-worklet.js`：监听端单页与 AudioWorklet 播放器。
+- `simulator_standalone/sim_device.py`：独立设备模拟器（单文件、自带协议层、内嵌 Opus 样本、纯 Python 合成音，仅依赖 `websockets`）。可本地运行连云端/局域网服务器，等价于 `server/simulator.py` 的外部形态。参数见 `--help` 及该目录 README。
 
 ## 关键约定
 - 实时音频：16kHz / 16bit / mono，每帧 640 字节(20ms)。

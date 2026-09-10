@@ -40,6 +40,9 @@ remoteAudioServer/
 │   │   ├── index.html       # 监听端单页应用（深色科技风、中文界面）
 │   │   └── pcm-worklet.js   # AudioWorkletProcessor（实时 PCM 播放）
 │   └── assets/*.opus    # 预置的 Ogg Opus 录音资产（供虚拟设备回放）
+├── simulator_standalone/
+│   ├── sim_device.py    # 独立设备模拟器（可本地运行，连接云端/局域网服务器）
+│   └── README.md        # 独立模拟器使用说明
 ├── requirements.txt
 ├── README.md
 └── .coze                # 云环境构建/运行配置
@@ -117,6 +120,31 @@ remoteAudioServer/
 - 录音开关打开时每 15~30s 随机产生一个 `recording_saved` 事件（模拟 VAD 触发录音）。
 
 **可断连 / 重连**：页面顶部模拟器区域每台设备有「连接 / 断开」按钮，用于演示设备离线、恢复在线。
+
+---
+
+## 四·五、独立设备模拟器（本地运行，连接云端）
+
+内置模拟器是「服务端内部起客户端」；如果你想让**自己本机的 Python 脚本**以真实设备身份连到「云端部署的服务器」（或局域网服务器），用独立脚本：
+
+```bash
+cd simulator_standalone
+
+# 连云端 HTTPS 部署（自动用 wss://），模拟 2 台设备
+python3 sim_device.py --url https://<你的云端域名> --device-ids sim-101,sim-102
+
+# 连局域网/http（默认 ws://）
+python3 sim_device.py --host 192.168.1.10 --port 8000 --device-ids sim-101
+
+# 单台、自定义音调频率；关闭自动生成录音事件
+python3 sim_device.py --url https://<域名> --device-ids sim-103 --freq 520 --no-auto-record
+```
+
+要点：
+- 仅依赖 `websockets`（`pip install websockets`），自带协议层、纯 Python 合成蜂鸣（无需 numpy），并**内嵌一段真实 Ogg Opus 录音样本**——即使本机没有 `.opus` 资产也能回放；
+- 与内置模拟器同一套设备协议：`hello` → 15s `ping` → 响应 `start_stream`/`stop_stream` / `list_recordings` / `play_file` / `set_recording` / `set_config`，并定时产生 `recording_saved`；
+- 每台设备连接失败自动退避重连（2s）；断开脚本即可下线，服务端 45s 心跳巡检也会在失联后清理。
+- 完整参数见 `simulator_standalone/` 下的说明文档或 `python3 sim_device.py --help`。
 
 ---
 
