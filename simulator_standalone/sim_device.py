@@ -34,8 +34,11 @@ import asyncio
 import base64
 import json
 import math
+import os
 import random
+import shutil
 import struct
+import subprocess
 import sys
 import time
 
@@ -98,7 +101,7 @@ def load_samples(assets_dir: str) -> list:
     samples = []
     if assets_dir and os.path.isdir(assets_dir):
         for fn in sorted(os.listdir(assets_dir)):
-            if fn.endswith(".opus"):
+            if fn.lower().endswith((".opus", ".ogg")):
                 with open(os.path.join(assets_dir, fn), "rb") as f:
                     samples.append((fn, f.read()))
     if not samples and _EMBEDDED_OPUS_B64 and _EMBEDDED_OPUS_B64 != "__OPUS_B64__":
@@ -109,18 +112,61 @@ def load_samples(assets_dir: str) -> list:
     return samples
 
 
+def decode_audio_to_pcm(path: str) -> bytes:
+    """用系统 ffmpeg 把本地音频（opus/ogg/wav/mp3…）解码为 16kHz/16bit/mono 原始 PCM 字节。
+    ffmpeg 不可用或解码失败时抛出异常（调用方回退到合成蜂鸣）。"""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("未找到 ffmpeg，请先安装（macOS: brew install ffmpeg；"
+                           "Ubuntu/Debian: sudo apt install ffmpeg）")
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", path,
+        "-f", "s16le", "-acodec", "pcm_s16le",
+        "-ac", "1", "-ar", str(SAMPLE_RATE),
+        "-",
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0 or len(proc.stdout) < PCM_FRAME_BYTES:
+        raise RuntimeError(f"ffmpeg 解码失败: {proc.stderr.decode(errors='ignore')[:200]}")
+    return proc.stdout
+
+
+def load_live_pcm(source: str) -> bytes:
+    """加载「实时监听」要推出去的音频源，返回循环用 PCM 字节。
+    source 可为单个音频文件，或包含多个音频文件的目录（会按序拼接循环）。
+    失败抛异常。"""
+    paths = []
+    if os.path.isdir(source):
+        for fn in sorted(os.listdir(source)):
+            if fn.lower().endswith((".opus", ".ogg", ".wav", ".mp3", ".m4a", ".flac")):
+                paths.append(os.path.join(source, fn))
+    elif os.path.isfile(source):
+        paths.append(source)
+    if not paths:
+        raise RuntimeError(f"实时音频源不存在或为空: {source}")
+    parts = []
+    for p in paths:
+        pcm = decode_audio_to_pcm(p)
+        parts.append(pcm)
+        print(f"  已解码实时音源: {os.path.basename(p)} "
+              f"({len(pcm) // (SAMPLE_RATE * BYTES_PER_SAMPLE)} 秒 PCM)")
+    return b"".join(parts)
+
+
 # =====================================================================
 # 虚拟设备
 # =====================================================================
 class SimDevice:
     def __init__(self, device_id: str, url: str, samples: list,
-                 auto_record: bool = True, freq: float = 0.0):
+                 auto_record: bool = True, freq: float = 0.0, live_pcm: bytes = b""):
         self.did = device_id
         self.url = url
         self.samples = samples
         self.auto_record = auto_record
         self.freq = freq or _DEFAULT_TONES.get(device_id, 700.0)
-        self.tone_buf = build_tone(self.freq)
+        # 实时监听音源：优先使用本地音频解码出的 PCM，否则用合成蜂鸣
+        self.live_buf = live_pcm if live_pcm else build_tone(self.freq)
+        self.using_file = bool(live_pcm)
         self.recording_enabled = True
         self.config = dict(_SIM_CONF)
         self._rng = random.Random()
@@ -179,17 +225,28 @@ class SimDevice:
                 await asyncio.sleep(DEVICE_PING_INTERVAL)
 
         async def stream_loop():
-            nonlocal offset
             try:
+                src = self.live_buf
+                blen = len(src)
+                phase = 0
+                t0 = time.time()
+                idx = 0
                 while not stream_stop.is_set():
-                    chunk = self.tone_buf[offset:offset + PCM_FRAME_BYTES]
-                    if len(chunk) < PCM_FRAME_BYTES:
-                        chunk += self.tone_buf[:PCM_FRAME_BYTES - len(chunk)]
-                        offset = PCM_FRAME_BYTES - len(self.tone_buf[offset:offset + PCM_FRAME_BYTES])
+                    # 循环读取 640 字节；不足则回卷到开头，保证无缝循环
+                    end = phase + PCM_FRAME_BYTES
+                    if end <= blen:
+                        chunk = src[phase:end]
+                        phase = 0 if end == blen else end
                     else:
-                        offset = (offset + PCM_FRAME_BYTES) % len(self.tone_buf)
+                        tail = src[phase:]
+                        phase = PCM_FRAME_BYTES - len(tail)
+                        chunk = tail + src[:phase]
                     await ws.send(_encode_frame(FRAME_LIVE_AUDIO, 0, 0, chunk))
-                    await asyncio.sleep(0.020)
+                    idx += 1
+                    target = t0 + idx * 0.020
+                    dt = target - time.time()
+                    if dt > 0:
+                        await asyncio.sleep(dt)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -332,6 +389,9 @@ def _arg_parser():
     p.add_argument("--freq", type=float, default=0.0,
                    help="蜂鸣频率 Hz（0=按设备ID默认；仅单设备时有意义）")
     p.add_argument("--assets-dir", default="", help="本地 .opus 资产目录（虚拟录音内容）")
+    p.add_argument("--live-file", default="",
+                   help="实时监听时推送本地音频（替代合成蜂鸣）。可传单个音频文件或目录"
+                        "（opus/ogg/wav/mp3/m4a/flac 均可）；用系统 ffmpeg 解码，多文件按序循环。")
     p.add_argument("--no-auto-record", action="store_true",
                    help="关闭定时自动生成 recording_saved 事件")
     return p
@@ -356,6 +416,16 @@ def main(argv=None):
 
     samples = load_samples(args.assets_dir)
 
+    live_pcm = b""
+    if args.live_file:
+        try:
+            live_pcm = load_live_pcm(args.live_file)
+            print(f"实时监听音源：{args.live_file} "
+                  f"({len(live_pcm) // (SAMPLE_RATE * BYTES_PER_SAMPLE)} 秒 PCM，循环播放)")
+        except Exception as e:
+            print(f"[警告] 加载实时音源失败，回退为合成蜂鸣：{e}", file=sys.stderr)
+            live_pcm = b""
+
     async def _run_all():
         devs = []
         for i, did in enumerate(device_ids):
@@ -364,9 +434,11 @@ def main(argv=None):
             if len(device_ids) == 1 and args.freq > 0:
                 freq = args.freq
             devs.append(SimDevice(did, url, samples,
-                                  auto_record=not args.no_auto_record, freq=freq))
+                                  auto_record=not args.no_auto_record,
+                                  freq=freq, live_pcm=live_pcm))
+        src_desc = "本地音频" if live_pcm else "合成蜂鸣"
         print("开始模拟设备：", ", ".join(device_ids),
-              f"| 服务器 {scheme}://{hostport} | 资产 {len(samples)} 个")
+              f"| 服务器 {scheme}://{hostport} | 资产 {len(samples)} 个 | 实时音源: {src_desc}")
         await asyncio.gather(*(d.run() for d in devs))
 
     try:
