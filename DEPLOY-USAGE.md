@@ -27,7 +27,7 @@ remoteAudioServer/
 │   ├── static/          # index.html 控制台页 + listen.html 监听页 + pcm-worklet.js
 │   └── assets/*.opus    # 预置 Ogg Opus 录音资产
 ├── simulator_standalone/
-│   ├── sim_device.py    # 独立设备模拟器（单文件、自带协议层、可连远程服务器）
+│   ├── sim_device.py    # 独立设备模拟器（单文件、自带协议层、可连远程服务器；支持 --live-file 推本地音频）
 │   └── README.md
 ├── requirements.txt
 └── .coze                # 云环境构建/运行配置
@@ -134,6 +134,7 @@ python3 sim_device.py --host 192.168.1.10 --port 8000 --device-ids sim-101,sim-1
 | `--device-ids` | 设备 ID，逗号分隔 | `sim-101` |
 | `--freq` | 蜂鸣频率 Hz（单台时自定义音调） | 设备默认 |
 | `--assets-dir` | 本机 `.opus` 目录（虚拟录音内容） | 内置样本 |
+| `--live-file` | **实时监听推送的本地音频**：单个文件或目录（opus/ogg/wav/mp3/m4a/flac），ffmpeg 解码为 16k PCM 循环推流；失败自动回退蜂鸣 | 无（合成蜂鸣） |
 | `--no-auto-record` | 关闭定时自动生成录音事件 | 关 |
 
 运行成功会打印：
@@ -144,6 +145,22 @@ python3 sim_device.py --host 192.168.1.10 --port 8000 --device-ids sim-101,sim-1
 ```
 
 > 连云端时建议用不重复的 ID（如 `sim-103` / `sim-201`），与云端内置的 `sim-101/102` 错开。
+
+### D. 实时监听时推送本地音频（`--live-file`）
+
+默认实时监听推的是合成蜂鸣。若想让设备推「真实音频」，用 `--live-file` 指向本地音频即可：
+
+```bash
+# 连云端 + 实时播放本地某段音频
+python3 sim_device.py --url https://<你的云端域名> --device-ids sim-103 --live-file ./voice.opus
+
+# 传目录：目录内音频按文件名排序拼接成一段，整体无缝循环
+python3 sim_device.py --url https://<你的云端域名> --device-ids sim-103 --live-file ./live_audios
+```
+
+- 原理：脚本启动时用系统 **ffmpeg** 把本地音频统一转码为协议要求的 **16kHz/16bit/单声道** PCM，收到 `start_stream` 后按每帧 640B（20ms）实时推送，直到 `stop_stream`。
+- 因此本机需安装 `ffmpeg`（macOS `brew install ffmpeg` / Ubuntu `sudo apt install ffmpeg`）。**未装 ffmpeg 或文件无效时自动回退为合成蜂鸣**，其它功能不受影响（启动日志会打印用的是「本地音频」还是「合成蜂鸣」）。
+- 与 `--assets-dir` 的区别：`--live-file` 走实时流（0x01），`--assets-dir` 走历史录音回放（0x02 文件分块）。两者互不影响。
 
 ### 关于录音文件的位置
 
@@ -184,6 +201,7 @@ python3 sim_device.py --host 192.168.1.10 --port 8000 --device-ids sim-101,sim-1
 - **听不到声音**：确认浏览器允许自动播放（点击「开始监听」属用户手势，一般已解锁）；音量电平条有跳动说明链路正常。
 - **录音列表空白**：先确认设备在线，或先「开始监听」建立连接再展开。
 - **连云端无声**：云端是 HTTPS，必须用 wss —— `--url https://...` 会自动处理。
+- **用了 `--live-file` 却还是蜂鸣声**：说明本机没装 ffmpeg 或文件路径/格式无效，脚本已自动回退蜂鸣；先 `ffmpeg -version` 确认，或试指向单个 `.opus`/`.wav`。
 - **端口冲突**：用 `--port` 换成其它端口，页面自动跟随。
 - **安全**：服务端无鉴权、状态仅存内存，仅用于演示/内网；对外部署需自行加防护。
 
