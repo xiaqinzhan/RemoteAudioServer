@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">音频监听端</string>
+    <string name="server_hint">服务器地址，如 https://xxxx.dev.coze.site</string>
+    <string name="connect">连接</string>
+    <string name="devices">设备列表</string>
+    <string name="recordings">历史录音</string>
+    <string name="start_listen">开始监听</string>
+    <string name="stop_listen">停止监听</string>
+    <string name="listening_worksheet">推流中</string>
+</resources>
