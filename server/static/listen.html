@@ -156,7 +156,7 @@ async function ensureAudio(){
   } catch (e) {
     try { ctx = new AudioCtx(); } catch (e2) { throw new Error('浏览器不支持 AudioContext'); }
   }
-  await ctx.audioWorklet.addModule('/static/pcm-worklet.js?v=3');
+  await ctx.audioWorklet.addModule('/static/pcm-worklet.js?v=4');
   const node = new AudioWorkletNode(ctx, 'pcm-sink');
   node.connect(ctx.destination);
   audio = { ctx, node };
@@ -184,10 +184,10 @@ function hdr(buf){
   return { type:d.getUint8(0), req:d.getUint32(1,false), seq:d.getUint16(5,false) };
 }
 function decodePcm(buf, off){
-  off = off || 7;
-  const payload = new Uint8Array(buf, off, buf.byteLength - off);
-  const n = payload.length >>> 1;
-  const i16 = new Int16Array(payload.buffer, 0, n);
+  // 关键：先切片成独立起点为 0 的 buffer（避免把 7 字节帧头当采样解码产生爆音）
+  const payload = buf.slice(off == null ? 7 : off);
+  const n = payload.byteLength >>> 1;
+  const i16 = new Int16Array(payload);
   const fl = new Float32Array(n);
   for(let i=0;i<n;i++) fl[i]=i16[i]/32768;
   return fl;
