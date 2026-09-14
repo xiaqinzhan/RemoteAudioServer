@@ -1,0 +1,102 @@
+menu "Remote Audio Node"
+
+    config RAN_FW_VERSION
+        string "Firmware version string (hello.fw)"
+        default "2.2.0"
+        help
+            Firmware version reported to the server in the hello message.
+            Must match the server-side protocol expectation.
+
+    config RAN_DIAG_INTERVAL_MS
+        int "运行状态心跳间隔 (ms, 0=关闭)"
+        default 10000
+        range 0 600000
+        help
+            独立的 diag 任务每隔这么久打一行运行状态（连接、堆、发送统计）。
+            设备若出现"日志突然静止/服务端掉线"，靠这行心跳判断 CPU 是否还活着。
+            0 = 关闭（正式量产可关）。
+
+    menu "WiFi"
+        config RAN_WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+        config RAN_WIFI_PASSWORD
+            string "WiFi password"
+            default "mypassword"
+    endmenu
+
+    menu "Server"
+        config RAN_SERVER_HOST
+            string "remoteAudioServer host (IP or domain)"
+            default "remoteaudio.coze.site"
+            help
+                Host running remoteAudioServer.
+                Default points at the Coze-hosted deployment (https://remoteaudio.coze.site).
+                For a local LAN server instead, set your PC's IP, e.g. 192.168.1.100.
+        config RAN_SERVER_PORT
+            int "Server port"
+            default 443
+            help
+                443 = Coze-hosted deployment (wss over TLS).
+                8000 = local uvicorn dev server (plain ws).
+        config RAN_SERVER_USE_TLS
+            bool "Use TLS (wss://)"
+            default y
+            help
+                Enabled: connect with wss:// and validate the server certificate
+                against the ESP-IDF CA bundle (requires correct system time -> SNTP).
+                Disable only when talking to a plain ws:// server on the LAN.
+    endmenu
+
+    menu "Device Identity"
+        config RAN_DEVICE_ID_OVERRIDE
+            string "Device ID override (empty = auto: esp32- + last 3 MAC bytes)"
+            default ""
+            help
+                Default device ID is "esp32-aabbcc" (last 3 MAC bytes in hex).
+                Set a non-empty string here to force a fixed ID, e.g. "esp32-test01".
+    endmenu
+
+    menu "Audio and Recording"
+        config RAN_VAD_THRESHOLD
+            int "VAD energy threshold (16-bit full scale = 32767)"
+            default 1200
+            range 0 32000
+            help
+                A 20 ms frame whose RMS exceeds this value is treated as voice.
+                Can be changed at runtime via the server set_config command (persisted).
+        config RAN_RETENTION_DAYS
+            int "Recording retention days (0 = keep forever)"
+            default 30
+            range 0 3650
+        config RAN_SILENCE_TIMEOUT_MS
+            int "Silence timeout to auto-stop recording (ms)"
+            default 1500
+        config RAN_MAX_CLIP_SECONDS
+            int "Max duration of one recording file (seconds, auto-split)"
+            default 600
+        config RAN_PREROLL_FRAMES
+            int "Pre-roll buffer frames (20 ms each; default 10 = 200 ms)"
+            default 10
+        config RAN_VAD_WIN_FRAMES
+            int "VAD sliding window frames"
+            default 8
+    endmenu
+
+    # 说明：这里原本有一个 RAN_ENABLE_I2S_TX（I2S 播放占位通道，默认开），
+    # 已经删除。它用 I2S_NUM_1 却复用 I2S0 的 BCLK/WS 引脚，会让录音失去时钟。
+    # 本工程固件不实现播放，等真正要加的时候改 I2S_NUM_0 全双工即可。
+
+    menu "OLED (SSD1306, optional)"
+        config RAN_ENABLE_OLED
+            bool "Enable SSD1306 status display"
+            default n
+            help
+                实战派 S3 板上没有 SSD1306 OLED（I2C SDA/SCL 未接线），
+                保持关闭；换到带 OLED 的板子时再打开。
+        config RAN_OLED_ADDR
+            hex "SSD1306 I2C address"
+            default 0x3C
+    endmenu
+
+endmenu
