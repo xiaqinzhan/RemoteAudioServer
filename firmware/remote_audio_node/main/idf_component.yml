@@ -1,0 +1,23 @@
+## IDF Component Manager Manifest File
+#
+# 第三方/托管组件依赖（ESP-IDF Component Manager，编译时自动拉取）：
+#
+# 1) 78/esp-opus —— xiaozhi-esp32 作者维护的 libopus 官方移植，
+#    提供标准 opus.h / opus_encoder_create / opus_encoder_ctl / opus_encode，
+#    全工程 Opus 调用隔离在 opus_encoder.c 薄封装中。
+#    注意：组件仓库里不存在 espressif/esp-opus 这个包，包名必须写 78/esp-opus。
+#
+# 2) espressif/esp_websocket_client —— IDF v5.x 起 WebSocket 客户端从核心框架
+#    移到组件仓库，必须在此显式声明（核心框架里已没有该组件）。
+#
+# 3) espressif/es7210 —— ES7210 四通道 ADC 的官方 I2C 配置驱动。
+#    只写寄存器，I2S 数据通路仍由本工程自己管（audio_i2s.c）。
+#    本工程不再自维护 es7210 寄存器表，避免用未经验证的时序。
+#    注意：官方头文件名为 es7210.h，所以本工程的封装文件叫 es7210_drv.*，
+#    否则同名会把官方头文件遮住。
+dependencies:
+  78/esp-opus: "^1.0.5"
+  espressif/esp_websocket_client: "^1.2.0"
+  espressif/es7210: "^1.0.0"
+  idf:
+    version: ">=5.1"
