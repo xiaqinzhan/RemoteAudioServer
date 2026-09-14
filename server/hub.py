@@ -45,6 +45,18 @@ class _Device:
         self.last_seen = P.now_ms()
 
 
+class _Listener:
+    """每个监听者一个：有界队列 + 独立 writer task，避免慢消费者堵住设备读取循环。"""
+    __slots__ = ("ws", "queue", "task", "dropped")
+    _QUEUE_MAX = 100  # 约 2 秒 @100Hz(20ms) 实时帧
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.queue = asyncio.Queue(maxsize=self._QUEUE_MAX)
+        self.task = None
+        self.dropped = 0
+
+
 class Hub:
     def __init__(self):
         self.devices: dict[str, _Device] = {}
@@ -82,8 +94,83 @@ class Hub:
             pass
 
     async def broadcast_event(self, device_id: str, obj: _JSON):
-        for ws in list(self.listeners.get(device_id, ())):
-            await self.send_json_to_listener(ws, obj)
+        for ln in list(self.listeners.get(device_id, ())):
+            await self.send_json_to_listener(ln.ws, obj)
+
+    def fanout_live(self, device_id: str, frame: bytes):
+        """非阻塞地把一帧实时音频推给全部监听者。绝不 await 发送：
+        每个监听者写入其有界队列；队满时丢最旧一帧并计数。"""
+        bucket = self.listeners.get(device_id)
+        if not bucket:
+            return
+        for ln in list(bucket):
+            try:
+                ln.queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                # 丢最旧的一帧，换入最新帧
+                try:
+                    ln.queue.get_nowait()
+                except Exception:
+                    pass
+                try:
+                    ln.queue.put_nowait(frame)
+                except Exception:
+                    pass
+                ln.dropped += 1
+                if ln.dropped % 50 == 0:
+                    log.warning(
+                        "fanout slow consumer dropping: device=%s listener=%r total_dropped=%s",
+                        device_id, ln.ws, ln.dropped,
+                    )
+
+    # 内部写缓冲高/低水位阈值，用于识别“对端停止消费”的真实网络背压（字节）
+    _BACKPRESSURE_HIGH = 128 * 1024
+    _BACKPRESSURE_LOW = 16 * 1024
+
+    async def _listener_writer(self, device_id: str, ln: _Listener):
+        """把监听者队列里的帧逐个发给对端。
+
+        发送用 3s `asyncio.wait_for` 兜底；与此同时，`websockets.send_bytes` 会把数据送进
+        asyncio transport 的写缓冲，对端停止读取时该缓冲会持续增长——这里在每次发送后对有界
+        背压做一次限时等待：若内部写缓冲高于高水位、且持续 3s 降不下来（即对端确实不消费），
+        就判定为 slow consumer 并主动剔除该监听连接。
+        """
+        try:
+            while True:
+                frame = await ln.queue.get()
+                try:
+                    await ln.ws.send_bytes(frame)
+                    await self._await_listener_backpressure(ln)
+                except Exception as exc:
+                    log.warning(
+                        "slow/failed consumer kicked: device=%s listener=%r err=%r dropped=%d",
+                        device_id, ln.ws, type(exc).__name__, ln.dropped,
+                    )
+                    try:
+                        await ln.ws.close()
+                    except Exception:
+                        pass
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    async def _await_listener_backpressure(self, ln: _Listener):
+        """等待监听者传输写缓冲降到低水位；3s 内降不下来抛超时（对端停止消费）。"""
+        tr = getattr(ln.ws, "transport", None)
+        get_size = getattr(tr, "get_write_buffer_size", None)
+        if get_size is None:
+            return
+        if get_size() <= self._BACKPRESSURE_HIGH:
+            return  # 缓冲不大，说明对端仍在消费，无需等待
+
+        async def _drain():
+            while get_size() > self._BACKPRESSURE_LOW:
+                await asyncio.sleep(0.02)
+
+        try:
+            await asyncio.wait_for(_drain(), timeout=3.0)
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError("slow consumer: transport write buffer not draining")
 
     # ------------------------------------------------------------------
     # 设备接入
@@ -93,6 +180,7 @@ class Hub:
         try:
             msg = await ws.receive_json()
         except Exception:
+            log.warning("device %s bad hello: read failed / no message", device_id)
             try:
                 await ws.close()
             except Exception:
@@ -100,6 +188,8 @@ class Hub:
             return
 
         if not isinstance(msg, dict) or msg.get("type") != "hello":
+            summary = (msg or {}).get("type") if isinstance(msg, dict) else type(msg).__name__
+            log.warning("device %s bad hello (first_type=%r), closing 1008", device_id, summary)
             try:
                 await ws.close(code=1008)
             except Exception:
@@ -126,6 +216,7 @@ class Hub:
             await self.send_json_to_device(device_id, {"cmd": "start_stream"})
         log.info("device online: %s", device_id)
 
+        gone_reason = "read_loop_end"
         try:
             while True:
                 message = await ws.receive()
@@ -136,11 +227,13 @@ class Hub:
                     await self._on_device_binary(device_id, message["bytes"])
                     dev.last_seen = P.now_ms()
                 elif message.get("type") == "websocket.disconnect":
+                    if message.get("code") == 1001:  # sweeper 超时踢除使用 1001
+                        gone_reason = "timeout_kick"
                     break
         except Exception:
             pass
         finally:
-            await self._device_gone(device_id)
+            await self._device_gone(device_id, reason=gone_reason)
 
     async def _on_device_text(self, device_id: str, text: str):
         try:
@@ -169,9 +262,8 @@ class Hub:
         except Exception:
             return
         if ftype == P.FRAME_LIVE_AUDIO:
-            # 实时音频帧 -> 广播给全部监听者
-            for ws in list(self.listeners.get(device_id, ())):
-                await self.send_binary_to_listener(ws, frame)
+            # 实时音频帧 -> 非阻塞广播给全部监听者（慢消费者有独立队列，不堵设备）
+            self.fanout_live(device_id, frame)
         elif ftype == P.FRAME_FILE_BLOCK:
             # 录音文件块 -> 按 req_id 路由回发起请求的监听者
             entry = self.pending.get(req_id)
@@ -181,10 +273,12 @@ class Hub:
                     listener_ws, P.rewrite_req_id(frame, orig_id)
                 )
 
-    async def _device_gone(self, device_id: str):
+    async def _device_gone(self, device_id: str, reason: str = "read_loop_end"):
         dev = self.devices.pop(device_id, None)
         if dev is None:
             return
+        log.info("device offline: device_id=%s reason=%s last_seen_age=%.1fs",
+                 device_id, reason, (P.now_ms() - dev.last_seen) / 1000.0)
         await self.broadcast_event(device_id, {
             "type": "event",
             "event": P.EV_DEVICE_OFFLINE,
@@ -201,7 +295,6 @@ class Hub:
                 "device_id": device_id,
                 "msg": "设备离线，请求未完成",
             })
-        log.info("device offline: %s", device_id)
 
     # ------------------------------------------------------------------
     # 监听者接入
@@ -209,7 +302,9 @@ class Hub:
     async def handle_listener(self, device_id: str, ws):
         bucket = self.listeners.setdefault(device_id, set())
         was_empty = not bucket
-        bucket.add(ws)
+        ln = _Listener(ws)
+        bucket.add(ln)
+        ln.task = asyncio.get_running_loop().create_task(self._listener_writer(device_id, ln))
         if was_empty:
             # 0 -> 1：首次监听者加入，通知设备开流
             await self.send_json_to_device(device_id, {"cmd": "start_stream"})
@@ -229,7 +324,10 @@ class Hub:
         except Exception:
             pass
         finally:
-            bucket.discard(ws)
+            # 取消 writer task 并回收队列，防止任务/内存泄漏
+            if ln.task is not None:
+                ln.task.cancel()
+            bucket.discard(ln)
             if not bucket:
                 self.listeners.pop(device_id, None)
                 await self.send_json_to_device(device_id, {"cmd": "stop_stream"})
@@ -279,13 +377,15 @@ class Hub:
     def device_list(self) -> list:
         items = []
         for device_id, dev in self.devices.items():
+            age = P.now_ms() - dev.last_seen
+            online = age <= P.DEVICE_TIMEOUT_MS
             items.append({
                 "device_id": device_id,
-                "online": True,
+                "online": online,
                 "fw": dev.fw,
                 "recording_enabled": dev.recording_enabled,
                 "sd_ok": dev.sd_ok,
-                "listener_count": len(self.listeners.get(device_id, set())),
+                "listener_count": len(self.listeners.get(device_id, ())),
                 "config": dev.config,
                 "last_seen": dev.last_seen,
             })
@@ -298,7 +398,9 @@ class Hub:
             now = P.now_ms()
             for device_id, dev in list(self.devices.items()):
                 if now - dev.last_seen > P.DEVICE_TIMEOUT_MS:
-                    log.warning("device %s silent over timeout, kicking", device_id)
+                    silent_s = (now - dev.last_seen) / 1000.0
+                    log.warning("device %s silent %.0fs (limit %ss), kicking",
+                                device_id, silent_s, P.DEVICE_TIMEOUT_MS / 1000)
                     try:
                         await dev.ws.close(code=1001)
                     except Exception:
