@@ -23,6 +23,12 @@ from . import protocol as P
 
 log = logging.getLogger("hub")
 
+# 新增消息类型（不得改变既有类型语义）：
+#  - hb: 应用层心跳 {"type":"hb","ts":<ms>}，无 cmd 字段，老端会静默忽略
+#  - device_reconnecting: 设备掉线进入重连宽限期，通知监听者
+_TYPE_HB = "hb"
+EV_DEVICE_RECONNECTING = "device_reconnecting"
+
 _JSON = dict
 
 
@@ -58,10 +64,19 @@ class _Listener:
 
 
 class Hub:
+    # 每条 WebSocket 连接每 20s 下发一条应用层心跳 {"type":"hb","ts":..}
+    # （必须用应用层数据帧；uvicorn 协议级 ping 不足以对平台网关保活）
+    HEARTBEAT_INTERVAL = 20.0
+    # 设备掉线后的重连宽限期：期内保留监听端、可下发 device_reconnecting；
+    # 设备在期内重连并 hello 则按现有逻辑自动 start_stream；超期才真正 offline 清理
+    DEVICE_RECONNECT_GRACE_MS = 45_000
+
     def __init__(self):
         self.devices: dict[str, _Device] = {}
-        self.listeners: dict[str, set] = {}          # device_id -> {listener ws}
+        self.listeners: dict[str, set] = {}          # device_id -> {listener _Listener}
         self.pending: dict[int, tuple] = {}          # internal_id -> (device_id, listener_ws, orig_req_id)
+        # 设备掉线进入重连宽限期的截止时间(ms)：device_id -> deadline
+        self.reservations: dict[str, float] = {}
         self._id_counter = 0
 
     # ------------------------------------------------------------------
@@ -86,6 +101,28 @@ class Hub:
             await ws.send_json(obj)
         except Exception:
             pass
+
+    async def _heartbeat_loop(self, ws, label: str):
+        """每 HEARTBEAT_INTERVAL 秒下发一条应用层心跳，保证过长连接不被平台网关切断。
+
+        只新增消息类型 {"type":"hb","ts":..}：无 cmd 字段，老固件/老前端会静默忽略。
+        发送失败说明连接已死，直接收尾返回，由对端主读取循环走既有清理路径，不抛异常。
+        """
+        try:
+            while True:
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                try:
+                    await ws.send_json({"type": _TYPE_HB, "ts": P.now_ms()})
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.debug("[hb] %s send failed, stop heartbeat", label)
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 任何非预期异常都不得打断主循环
+            log.debug("[hb] %s heartbeat task ended", label)
 
     async def send_binary_to_listener(self, ws, frame: bytes):
         try:
@@ -204,6 +241,8 @@ class Hub:
             config=msg.get("config") or {},
         )
         self.devices[device_id] = dev
+        # 设备回来了：清除掉线宽限期标记（若有），避免宽限期结束后再误触发 offline
+        self.reservations.pop(device_id, None)
         await self.broadcast_event(device_id, {
             "type": "event",
             "event": P.EV_DEVICE_ONLINE,
@@ -211,10 +250,14 @@ class Hub:
             "fw": dev.fw,
             "ts": P.now_ms(),
         })
-        # 若已有监听者在等，设备一上线就开启推流
+        # 若已有监听者在等，设备一上线就开启推流（可让宽限期内的监听自动续上）
         if self.listeners.get(device_id):
             await self.send_json_to_device(device_id, {"cmd": "start_stream"})
         log.info("device online: %s", device_id)
+
+        # 应用层心跳：保活长连接，防止平台网关按"单向上行/空闲"计时切断
+        hb_task = asyncio.get_running_loop().create_task(
+            self._heartbeat_loop(ws, f"device:{device_id}"))
 
         gone_reason = "read_loop_end"
         try:
@@ -233,6 +276,8 @@ class Hub:
         except Exception:
             pass
         finally:
+            if "hb_task" in locals():
+                hb_task.cancel()
             await self._device_gone(device_id, reason=gone_reason)
 
     async def _on_device_text(self, device_id: str, text: str):
@@ -277,8 +322,23 @@ class Hub:
         dev = self.devices.pop(device_id, None)
         if dev is None:
             return
-        log.info("device offline: device_id=%s reason=%s last_seen_age=%.1fs",
-                 device_id, reason, (P.now_ms() - dev.last_seen) / 1000.0)
+        log.info("device disconnect: device_id=%s reason=%s last_seen_age=%.1fs "
+                 "entering %ds reconnect grace",
+                 device_id, reason, (P.now_ms() - dev.last_seen) / 1000.0,
+                 self.DEVICE_RECONNECT_GRACE_MS / 1000)
+        # 进入掉线宽限期：保留监听连接，先不下发 device_offline，等设备重连
+        self.reservations[device_id] = P.now_ms() + self.DEVICE_RECONNECT_GRACE_MS
+        await self.broadcast_event(device_id, {
+            "type": "event",
+            "event": EV_DEVICE_RECONNECTING,
+            "device_id": device_id,
+            "ts": P.now_ms(),
+        })
+
+    async def _device_offline_final(self, device_id: str):
+        """宽限期结束，设备仍未回来：真正下线并清理。"""
+        log.info("device offline(final): device_id=%s reconnect grace expired", device_id)
+        self.reservations.pop(device_id, None)
         await self.broadcast_event(device_id, {
             "type": "event",
             "event": P.EV_DEVICE_OFFLINE,
@@ -305,6 +365,8 @@ class Hub:
         ln = _Listener(ws)
         bucket.add(ln)
         ln.task = asyncio.get_running_loop().create_task(self._listener_writer(device_id, ln))
+        hb_task = asyncio.get_running_loop().create_task(
+            self._heartbeat_loop(ws, f"listen:{device_id}"))
         if was_empty:
             # 0 -> 1：首次监听者加入，通知设备开流
             await self.send_json_to_device(device_id, {"cmd": "start_stream"})
@@ -324,6 +386,7 @@ class Hub:
         except Exception:
             pass
         finally:
+            hb_task.cancel()
             # 取消 writer task 并回收队列，防止任务/内存泄漏
             if ln.task is not None:
                 ln.task.cancel()
@@ -405,6 +468,11 @@ class Hub:
                         await dev.ws.close(code=1001)
                     except Exception:
                         pass
+            # 设备重连宽限期到期：仍没回来才真正 device_offline 并清理
+            for device_id, deadline in list(self.reservations.items()):
+                if now >= deadline:
+                    self.reservations.pop(device_id, None)
+                    await self._device_offline_final(device_id)
 
     async def start_stream(self, device_id: str):
         await self.send_json_to_device(device_id, {"cmd": "start_stream"})
