@@ -70,7 +70,7 @@ async def listen_page():
 
 @app.get("/api/devices")
 async def api_devices():
-    return {"devices": hub.device_list(), "ts": P.now_ms()}
+    return {"devices": await hub.device_list(), "ts": P.now_ms()}
 
 
 @app.get("/api/simulator/status")

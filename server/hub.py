@@ -20,6 +20,7 @@ import logging
 import json
 
 from . import protocol as P
+from . import presence
 
 log = logging.getLogger("hub")
 
@@ -102,11 +103,13 @@ class Hub:
         except Exception:
             pass
 
-    async def _heartbeat_loop(self, ws, label: str):
+    async def _heartbeat_loop(self, ws, label: str, device_id: str | None = None):
         """每 HEARTBEAT_INTERVAL 秒下发一条应用层心跳，保证过长连接不被平台网关切断。
 
         只新增消息类型 {"type":"hb","ts":..}：无 cmd 字段，老固件/老前端会静默忽略。
         发送失败说明连接已死，直接收尾返回，由对端主读取循环走既有清理路径，不抛异常。
+        对设备连接（device_id 非空）顺带刷新共享状态里的 last_seen，保证多实例下
+        /api/devices 不会因为设备静默（无上行帧）而被误判离线。
         """
         try:
             while True:
@@ -118,6 +121,9 @@ class Hub:
                 except Exception:
                     log.debug("[hb] %s send failed, stop heartbeat", label)
                     return
+                if device_id is not None:
+                    # 连接仍然活着：刷新共享状态的时间戳（失败不影响心跳）
+                    await presence.touch(device_id, P.now_ms())
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -255,9 +261,14 @@ class Hub:
             await self.send_json_to_device(device_id, {"cmd": "start_stream"})
         log.info("device online: %s", device_id)
 
+        # 写入跨实例共享的在线状态（失败自动降级为本地内存，不影响主流程）
+        await presence.upsert_device(
+            device_id, dev.fw, dev.recording_enabled, dev.sd_ok,
+            dev.config, dev.last_seen)
+
         # 应用层心跳：保活长连接，防止平台网关按"单向上行/空闲"计时切断
         hb_task = asyncio.get_running_loop().create_task(
-            self._heartbeat_loop(ws, f"device:{device_id}"))
+            self._heartbeat_loop(ws, f"device:{device_id}", device_id=device_id))
 
         gone_reason = "read_loop_end"
         try:
@@ -328,6 +339,8 @@ class Hub:
                  self.DEVICE_RECONNECT_GRACE_MS / 1000)
         # 进入掉线宽限期：保留监听连接，先不下发 device_offline，等设备重连
         self.reservations[device_id] = P.now_ms() + self.DEVICE_RECONNECT_GRACE_MS
+        # 从跨实例共享状态移除，使任意实例的 /api/devices 都能及时反映该设备已断开
+        await presence.remove(device_id)
         await self.broadcast_event(device_id, {
             "type": "event",
             "event": EV_DEVICE_RECONNECTING,
@@ -437,22 +450,51 @@ class Hub:
     # ------------------------------------------------------------------
     # REST 支持 / 生命周期
     # ------------------------------------------------------------------
-    def device_list(self) -> list:
-        items = []
+    async def device_list(self) -> list:
+        """合并本进程内存 + 跨实例共享状态，返回全部在线设备。
+
+        - 本进程持有的设备：使用内存中的实时信息（含 listener_count、最新 last_seen）。
+        - 其它实例持有的设备：从共享表读取（last_seen 由持有实例周期刷新）。
+        - 共享状态不可用时自动降级为仅本地内存（单实例行为），不影响主流程。
+        """
+        now = P.now_ms()
+        items: dict[str, dict] = {}
+
+        # 1) 本地内存中的设备
         for device_id, dev in self.devices.items():
-            age = P.now_ms() - dev.last_seen
-            online = age <= P.DEVICE_TIMEOUT_MS
-            items.append({
+            age = now - dev.last_seen
+            items[device_id] = {
                 "device_id": device_id,
-                "online": online,
+                "online": age <= P.DEVICE_TIMEOUT_MS,
                 "fw": dev.fw,
                 "recording_enabled": dev.recording_enabled,
                 "sd_ok": dev.sd_ok,
                 "listener_count": len(self.listeners.get(device_id, ())),
                 "config": dev.config,
                 "last_seen": dev.last_seen,
-            })
-        return items
+            }
+
+        # 2) 跨实例共享状态（其它实例上的设备）
+        rows = await presence.list_devices()
+        if rows:
+            for row in rows:
+                device_id = row.get("device_id")
+                if not device_id or device_id in items:
+                    continue
+                last_seen = int(row.get("last_seen") or 0)
+                items[device_id] = {
+                    "device_id": device_id,
+                    "online": (now - last_seen) <= P.DEVICE_TIMEOUT_MS,
+                    "fw": row.get("fw") or "unknown",
+                    "recording_enabled": bool(row.get("recording_enabled", True)),
+                    "sd_ok": bool(row.get("sd_ok", True)),
+                    # 监听者连接本身是实例本地的；非本实例设备此处为 0
+                    "listener_count": len(self.listeners.get(device_id, ())),
+                    "config": row.get("config") or {},
+                    "last_seen": last_seen,
+                }
+
+        return list(items.values())
 
     async def sweeper(self):
         """定期巡检：超过 45s 无消息的设备强制下线。"""
@@ -473,6 +515,8 @@ class Hub:
                 if now >= deadline:
                     self.reservations.pop(device_id, None)
                     await self._device_offline_final(device_id)
+            # 清理共享库中的僵尸行（实例崩溃未 delete 的行，保留 5 分钟）
+            await presence.purge_stale(now - 300_000)
 
     async def start_stream(self, device_id: str):
         await self.send_json_to_device(device_id, {"cmd": "start_stream"})

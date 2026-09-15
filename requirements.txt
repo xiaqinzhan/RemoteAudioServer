@@ -3,3 +3,5 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 websockets>=12.0
 numpy>=1.26
+# 共享设备在线状态（跨实例）：Supabase / PostgREST 客户端
+supabase>=2.10
