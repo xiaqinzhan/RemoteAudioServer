@@ -26,6 +26,9 @@ python3 -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 - 音频播放必须用 AudioWorklet，禁止 ScriptProcessorNode。
 - 新增录音资产放 `server/assets/*.opus`（ffmpeg 生成，16kHz mono libopus）。
 - **设备在线状态为跨实例共享**：线上可能多实例承载同一域名，WS 长连接粘在单实例、HTTP 可能落到另一实例。故 `/api/devices` 必须读共享表 `public.device_presence`（按 `last_seen` 新鲜度判定 online），不能只依赖本地 `self.devices`；音频转发仍本地进行。
+- **设备上线即复盘推流**：设备 hello 注册后**按该 device_id 当前真实监听者数量**下发指令（`>0 → {"type":"cmd","cmd":"start_stream"}`，`==0 → {"type":"cmd","cmd":"stop_stream"}`），首次连接与重连一律复盘。修复「设备断网期间监听者离开 → stop_stream 丢失 → 重连后对空气推流」。
+- **下行心跳带监听人数**：`_heartbeat_loop` 每 20s 下发的 `{"type":"hb","ts":...}` 增加整数 `listeners`（该设备当前监听者数量）；老固件忽略未知字段。
+- **监听者 1→0 延迟停流**：监听者全部离开时不立即 `stop_stream`，延迟 `LISTENER_STOP_DELAY_S`(10s) 再停；期内若有监听者回来则取消（`_schedule_stop`/`_cancel_stop_timer`/`_delayed_stop`）。避免监听页刷新一下即掐断设备推流。
 
 ## 测试
 - 自检：`python3 -m py_compile server/*.py`

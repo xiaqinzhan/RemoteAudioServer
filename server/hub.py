@@ -68,9 +68,13 @@ class Hub:
     # 每条 WebSocket 连接每 20s 下发一条应用层心跳 {"type":"hb","ts":..}
     # （必须用应用层数据帧；uvicorn 协议级 ping 不足以对平台网关保活）
     HEARTBEAT_INTERVAL = 20.0
-    # 设备掉线后的重连宽限期：期内保留监听端、可下发 device_reconnecting；
-    # 设备在期内重连并 hello 则按现有逻辑自动 start_stream；超期才真正 offline 清理
+    # 设备掉线后的重连宽限期：期内保留监听端、可下发 device_reconnecting
+    # （超期才真正 offline 清理）。期内设备重连并 hello 时，是否推流**不再无条件
+    # start_stream**，而是由 hello 复盘逻辑按"当前真实监听者数量"决定 start/stop。
     DEVICE_RECONNECT_GRACE_MS = 45_000
+    # 监听者 1->0 后延迟多久再给设备下发 stop_stream（秒）。
+    # 期内若又有监听者接入则取消停流，避免刷新页面就掐断设备推流。
+    LISTENER_STOP_DELAY_S = 10.0
 
     def __init__(self):
         self.devices: dict[str, _Device] = {}
@@ -78,6 +82,8 @@ class Hub:
         self.pending: dict[int, tuple] = {}          # internal_id -> (device_id, listener_ws, orig_req_id)
         # 设备掉线进入重连宽限期的截止时间(ms)：device_id -> deadline
         self.reservations: dict[str, float] = {}
+        # 监听者 1->0 后的"延迟停流"定时任务：device_id -> asyncio.Task
+        self._stop_timers: dict[str, asyncio.Task] = {}
         self._id_counter = 0
 
     # ------------------------------------------------------------------
@@ -103,10 +109,14 @@ class Hub:
         except Exception:
             pass
 
-    async def _heartbeat_loop(self, ws, label: str, device_id: str | None = None):
+    async def _heartbeat_loop(self, ws, label: str, device_id: str | None = None,
+                              listeners_device_id: str | None = None):
         """每 HEARTBEAT_INTERVAL 秒下发一条应用层心跳，保证过长连接不被平台网关切断。
 
-        只新增消息类型 {"type":"hb","ts":..}：无 cmd 字段，老固件/老前端会静默忽略。
+        只新增消息类型 {"type":"hb","ts":..,"listeners":N}：无 cmd 字段，老固件/老前端
+        会静默忽略未知字段（仅新增，不改现有语义）。
+        listeners_device_id 用于在心跳里带上"该设备当前监听者数量"（只读，不给监听连接
+        触发 presence.touch，避免监听连接把已死设备的共享在线状态误刷新）。
         发送失败说明连接已死，直接收尾返回，由对端主读取循环走既有清理路径，不抛异常。
         对设备连接（device_id 非空）顺带刷新共享状态里的 last_seen，保证多实例下
         /api/devices 不会因为设备静默（无上行帧）而被误判离线。
@@ -114,8 +124,12 @@ class Hub:
         try:
             while True:
                 await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                hb: dict = {"type": _TYPE_HB, "ts": P.now_ms()}
+                target = listeners_device_id or device_id
+                if target is not None:
+                    hb["listeners"] = len(self.listeners.get(target, ()))
                 try:
-                    await ws.send_json({"type": _TYPE_HB, "ts": P.now_ms()})
+                    await ws.send_json(hb)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -256,10 +270,18 @@ class Hub:
             "fw": dev.fw,
             "ts": P.now_ms(),
         })
-        # 若已有监听者在等，设备一上线就开启推流（可让宽限期内的监听自动续上）
-        if self.listeners.get(device_id):
-            await self.send_json_to_device(device_id, {"cmd": "start_stream"})
-        log.info("device online: %s", device_id)
+        # 设备上线即"复盘"：按该 device_id 当前真实监听者数量决定是否推流。
+        # 首次连接与重连一律复盘。这修复了"设备断网期间监听者离开(1→0) → stop_stream
+        # 因设备不在线而丢失 → 设备重连后按本地记忆继续推流(对着空气白推)"的问题。
+        n_listeners = len(self.listeners.get(device_id, ()))
+        if n_listeners > 0:
+            await self.send_json_to_device(device_id, {"type": "cmd", "cmd": "start_stream"})
+            reconciled = "start_stream"
+        else:
+            await self.send_json_to_device(device_id, {"type": "cmd", "cmd": "stop_stream"})
+            reconciled = "stop_stream"
+        log.info("device online: %s (listeners=%d, reconciled=%s)",
+                 device_id, n_listeners, reconciled)
 
         # 写入跨实例共享的在线状态（失败自动降级为本地内存，不影响主流程）
         await presence.upsert_device(
@@ -381,8 +403,9 @@ class Hub:
         hb_task = asyncio.get_running_loop().create_task(
             self._heartbeat_loop(ws, f"listen:{device_id}"))
         if was_empty:
-            # 0 -> 1：首次监听者加入，通知设备开流
-            await self.send_json_to_device(device_id, {"cmd": "start_stream"})
+            # 0 -> 1：取消可能正在计时的"延迟停流"，并通知设备开流
+            self._cancel_stop_timer(device_id)
+            await self.send_json_to_device(device_id, {"type": "cmd", "cmd": "start_stream"})
             await self.broadcast_event(device_id, {
                 "type": "event", "event": P.EV_STREAM_STATE,
                 "device_id": device_id, "state": "streaming",
@@ -406,12 +429,37 @@ class Hub:
             bucket.discard(ln)
             if not bucket:
                 self.listeners.pop(device_id, None)
-                await self.send_json_to_device(device_id, {"cmd": "stop_stream"})
-                await self.broadcast_event(device_id, {
-                    "type": "event", "event": P.EV_STREAM_STATE,
-                    "device_id": device_id, "state": "idle",
-                    "listener_count": 0, "ts": P.now_ms(),
-                })
+                # 1 -> 0：不立即停流，延迟 LISTENER_STOP_DELAY_S 秒再停；
+                # 期内若有监听者回来则取消（见 _delayed_stop）
+                self._schedule_stop(device_id)
+
+    def _cancel_stop_timer(self, device_id: str):
+        t = self._stop_timers.pop(device_id, None)
+        if t is not None and not t.done():
+            t.cancel()
+
+    def _schedule_stop(self, device_id: str):
+        self._cancel_stop_timer(device_id)
+        self._stop_timers[device_id] = asyncio.get_running_loop().create_task(
+            self._delayed_stop(device_id))
+
+    async def _delayed_stop(self, device_id: str):
+        """延迟停流：到期时若仍无监听者，才给设备下发 stop_stream 并广播 idle。"""
+        try:
+            await asyncio.sleep(self.LISTENER_STOP_DELAY_S)
+            if self.listeners.get(device_id):
+                return  # 有监听者回来了，不停流
+            await self.send_json_to_device(device_id, {"type": "cmd", "cmd": "stop_stream"})
+            await self.broadcast_event(device_id, {
+                "type": "event", "event": P.EV_STREAM_STATE,
+                "device_id": device_id, "state": "idle",
+                "listener_count": 0, "ts": P.now_ms(),
+            })
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._stop_timers.get(device_id) is asyncio.current_task():
+                self._stop_timers.pop(device_id, None)
 
     async def _on_listener_text(self, device_id: str, ws, text: str):
         try:
