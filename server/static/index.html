@@ -173,6 +173,20 @@
   // ---------------------------------------------------------------- utils
   const $ = (s) => document.querySelector(s);
   const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  /* 客户端会话 id：同一标签页（含刷新/重连）复用，不同标签页各自不同。
+     服务端按 (device_id, sid) 去重，避免重连残留旧连接虚增监听人数。 */
+  function clientSid(){
+    const KEY = 'audioListenerSid';
+    let sid = null;
+    try { sid = sessionStorage.getItem(KEY); } catch(e){}
+    if (!sid){
+      sid = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : ('s' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+      try { sessionStorage.setItem(KEY, sid); } catch(e){}
+    }
+    return sid;
+  }
   const api = (p, opts) => fetch(p, opts).then(r => r.json());
   const J = { 'Content-Type': 'application/json' };
   let reqSeq = 0;
@@ -243,7 +257,8 @@
   function openListenWs(deviceId) {
     closeWs();
     let ws;
-    try { ws = new WebSocket(wsProto + location.host + '/ws/listen/' + deviceId); }
+    // role=live：本页这条连接会放实时音频，属于"真监听"，计入服务端人数
+    try { ws = new WebSocket(wsProto + location.host + '/ws/listen/' + deviceId + '?role=live&sid=' + encodeURIComponent(clientSid())); }
     catch (e) { return null; }
     ws.binaryType = 'arraybuffer';
     active.ws = ws;

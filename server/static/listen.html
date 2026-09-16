@@ -231,6 +231,21 @@ $('#btnRefresh').addEventListener('click', refreshDevices);
 
 /* ---------------- 实时监听 ---------------- */
 const WS_PROTO = location.protocol === 'https:' ? 'wss://' : 'ws://';
+/* 客户端会话 id：同一标签页（含刷新/自动重连）复用同一个值，不同标签页各自不同。
+   服务端按 (device_id, sid) 做去重：同 sid 的新连接会替换旧连接，避免刷新/重连
+   残留的旧 WebSocket 把"监听人数"虚增；而两个标签页是 2 个不同 sid = 2 个人。 */
+function clientSid(){
+  const KEY = 'audioListenerSid';
+  let sid = null;
+  try { sid = sessionStorage.getItem(KEY); } catch(e){}
+  if (!sid){
+    sid = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ('s' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+    try { sessionStorage.setItem(KEY, sid); } catch(e){}
+  }
+  return sid;
+}
 let liveWs = null, liveDevice = null, audioMode = 'idle';
 let liveActive = false;      // 用户是否期望保持实时监听（用于意外断线自动重连）
 let liveRetry = 0;           // 当前连续重连次数（退避）
@@ -267,7 +282,8 @@ async function startLive(fromRetry){
   catch(e){ console.error('audio init', e); setHint('音频初始化失败（可能被浏览器自动播放策略拦截），将仅连接不发声'); }
   liveDevice = curId;
   audioMode = 'live';
-  const url = `${WS_PROTO}${location.host}/ws/listen/${encodeURIComponent(curId)}`;
+  // role=live：这条才是"真在听"的连接，计入服务端监听人数、参与开流/停流判定
+  const url = `${WS_PROTO}${location.host}/ws/listen/${encodeURIComponent(curId)}?role=live&sid=${encodeURIComponent(clientSid())}`;
   let ws;
   try { ws = new WebSocket(url); }
   catch(e){
@@ -320,7 +336,8 @@ async function openRecWs(id){
   if (recWs && recDevice === id && recWs.readyState === 1) return recWs;
   if (recWs){ closeWs(recWs); recWs=null; }
   return await new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${WS_PROTO}${location.host}/ws/listen/${encodeURIComponent(id)}`);
+    // role=control：这条只用来查录音列表 / 取回放文件块，不计监听人数、不收实时 PCM
+    const ws = new WebSocket(`${WS_PROTO}${location.host}/ws/listen/${encodeURIComponent(id)}?role=control`);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { recWs=ws; recDevice=id; wireRec(ws); resolve(ws); };
     ws.onerror = () => reject(new Error('ws err'));
