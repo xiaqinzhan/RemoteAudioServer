@@ -9,6 +9,9 @@
 #
 # 2) espressif/esp_websocket_client —— IDF v5.x 起 WebSocket 客户端从核心框架
 #    移到组件仓库，必须在此显式声明（核心框架里已没有该组件）。
+#    ⚠ 下限必须 >=1.6.0：早期实现在每次收到数据后会重置 ping 计时器（等于
+#    「只有完全无流量时才发协议 ping」），1.6.0 的 "fix PING timing" 才改为
+#    周期性发送。低于 1.6.0 时 ws_client.c 里的 ping_interval_sec 可能被抑制。
 #
 # 3) espressif/es7210 —— ES7210 四通道 ADC 的官方 I2C 配置驱动。
 #    只写寄存器，I2S 数据通路仍由本工程自己管（audio_i2s.c）。
@@ -17,7 +20,7 @@
 #    否则同名会把官方头文件遮住。
 dependencies:
   78/esp-opus: "^1.0.5"
-  espressif/esp_websocket_client: "^1.2.0"
+  espressif/esp_websocket_client: "^1.6.0"
   espressif/es7210: "^1.0.0"
   idf:
     version: ">=5.1"

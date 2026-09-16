@@ -35,6 +35,8 @@ idf_component_register(
     SRCS
         "main.c"
         "wifi_mgr.c"
+        "wifi_cred.c"
+        "wifi_prov.c"
         "ws_client.c"
         "audio_i2s.c"
         "vad.c"
@@ -52,9 +54,16 @@ idf_component_register(
         "es7210_drv.c"
     INCLUDE_DIRS
         "."
+    # 配网页（wifi_prov.html）编译进固件，运行时由 esp_http_server 直接吐给手机。
+    # 用 EMBED_TXTFILES 而不是 packed 版本：文本模式末尾会补 '\0'，
+    # 正好用 HTTPD_RESP_USE_STRLEN 直接发，不必记长度。
+    # 符号：_binary_wifi_prov_html_start / _end
+    EMBED_TXTFILES
+        "wifi_prov.html"
     PRIV_REQUIRES
         nvs_flash
         esp_wifi
+        esp_http_server            # 配网页面 HTTP 服务（v2.5 新增）
         esp_event
         esp_netif
         esp_timer

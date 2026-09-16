@@ -33,16 +33,22 @@ static void diag_task(void *arg)
         int64_t  max_us = 0;
         ws_client_get_send_stats(&fail, &slow, &max_us);
 
+        uint32_t reconn = 0, conn_fail = 0, hard_reset = 0;
+        ws_client_get_link_stats(&reconn, &conn_fail, &hard_reset);
+        int listeners = ws_client_get_listeners();   /* v2.4：-1=服务端没报（未知） */
+
         ESP_LOGI(TAG,
-                 "心跳 %llds | ws=%d 推流=%d | 内部堆 %uK/最低 %uK | 发送失败 %u 慢发送 %u 最慢 %lldms 丢帧 %u",
+                 "心跳 %llds | ws=%d 推流=%d 监听 %d | 内部堆 %uK/最低 %uK | 发送失败 %u 慢发送 %u 最慢 %lldms 丢帧 %u | 重连 %u 建连失败 %u 硬复位 %u",
                  (long long)(esp_timer_get_time() / 1000000),
                  ws_client_is_connected() ? 1 : 0,
                  audio_stream_active() ? 1 : 0,
+                 listeners,
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                  (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
                  (unsigned)fail, (unsigned)slow,
                  (long long)(max_us / 1000),
-                 (unsigned)audio_stream_drop_count());
+                 (unsigned)audio_stream_drop_count(),
+                 (unsigned)reconn, (unsigned)conn_fail, (unsigned)hard_reset);
     }
 }
 #endif

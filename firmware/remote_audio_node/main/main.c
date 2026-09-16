@@ -2,10 +2,13 @@
  * main.c —— 多设备音频采集节点（ESP32-S3）启动入口
  *
  * 初始化顺序：NVS/配置 -> WiFi+SNTP -> SD 卡 -> I2S -> 录音状态机 ->
- *             按键 -> OLED -> WebSocket（最后启动，连上即发 hello）
+ *             按键 -> OLED -> 诊断心跳 -> （如需配网则先等配网）-> WebSocket
  * 任一非关键模块失败（SD/OLED）仅告警，不阻塞其余功能。
  */
 #include <stdio.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
@@ -13,6 +16,7 @@
 
 #include "device_config.h"
 #include "wifi_mgr.h"
+#include "wifi_prov.h"
 #include "sd_storage.h"
 #include "audio_i2s.h"
 #include "recorder.h"
@@ -66,14 +70,35 @@ void app_main(void)
         ESP_LOGW(TAG, "OLED 不可用（未接线或地址错误），继续运行");
     }
 
-    /* 8. WebSocket 客户端（自动重连，连上即发 hello） */
-    ESP_ERROR_CHECK(ws_client_start());
-
-    /* 9. 运行状态心跳（诊断黑匣子；失败不影响功能） */
+    /* 8. 运行状态心跳（诊断黑匣子；失败不影响功能）
+     *    提前到 WebSocket 之前：配网模式下也要能看到设备在跑 */
     if (diag_start() != ESP_OK) {
         ESP_LOGW(TAG, "运行状态心跳未启动（不影响功能）");
     }
 
-    ESP_LOGI(TAG, "=== 初始化完成，目标服务端 ws://%s:%d/ws/device/%s ===",
+    /* 9. 配网门闸：处于配网模式时先等用户配好网，再启动 WebSocket。
+     *    没有网络时启动 WS 只会反复重连刷日志，先把配网做完更干净。 */
+    if (wifi_mgr_is_provisioning()) {
+        ESP_LOGW(TAG, "进入配网模式：手机连热点「%s」→ 浏览器打开 http://%s",
+                 wifi_prov_ap_ssid(), CONFIG_RAN_PROV_AP_IP);
+        uint32_t waited_s = 0;
+        while (!wifi_mgr_is_connected() && wifi_mgr_is_provisioning()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            waited_s++;
+            if (waited_s % 30 == 0) {
+                ESP_LOGW(TAG, "配网等待中（%u 秒）：热点「%s」· 配网页 http://%s",
+                         (unsigned)waited_s, wifi_prov_ap_ssid(), CONFIG_RAN_PROV_AP_IP);
+            }
+        }
+        ESP_LOGI(TAG, "配网流程结束（%s），继续启动 WebSocket",
+                 wifi_mgr_is_connected() ? "已连上 WiFi" : "未连上，交给 WS 自身重试");
+    }
+
+    /* 10. WebSocket 客户端（自动重连，连上即发 hello） */
+    ESP_ERROR_CHECK(ws_client_start());
+
+    ESP_LOGI(TAG, "=== 初始化完成，WiFi=%s IP=%s，目标服务端 ws://%s:%d/ws/device/%s ===",
+             wifi_mgr_is_connected() ? "已连接" : "未连接",
+             wifi_mgr_get_ip(),
              CONFIG_RAN_SERVER_HOST, CONFIG_RAN_SERVER_PORT, cfg->device_id);
 }
