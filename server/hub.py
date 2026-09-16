@@ -33,6 +33,16 @@ EV_DEVICE_RECONNECTING = "device_reconnecting"
 _JSON = dict
 
 
+def _cmd_of(obj) -> str:
+    """取一条下行消息里的命令名，仅用于日志（没有 cmd 时退化为 type）。"""
+    if isinstance(obj, dict):
+        cmd = obj.get("cmd")
+        if cmd:
+            return str(cmd)
+        return str(obj.get("type", "?"))
+    return "?"
+
+
 async def _safe(aw_or_coro, default=None):
     try:
         return await aw_or_coro
@@ -41,7 +51,11 @@ async def _safe(aw_or_coro, default=None):
 
 
 class _Device:
-    __slots__ = ("ws", "fw", "recording_enabled", "sd_ok", "config", "last_seen")
+    """一条设备 WS 连接。replaced 用来标记"已被同 device_id 的新连接取代"，
+    使其收尾时不再按 device_id 误删当前注册（P0-1）。"""
+
+    __slots__ = ("ws", "fw", "recording_enabled", "sd_ok", "config", "last_seen",
+                 "replaced")
 
     def __init__(self, ws, fw, recording_enabled, sd_ok, config):
         self.ws = ws
@@ -50,18 +64,36 @@ class _Device:
         self.sd_ok = sd_ok
         self.config = config or {}
         self.last_seen = P.now_ms()
+        self.replaced = False
 
 
 class _Listener:
-    """每个监听者一个：有界队列 + 独立 writer task，避免慢消费者堵住设备读取循环。"""
-    __slots__ = ("ws", "queue", "task", "dropped")
+    """每个监听者一个：有界队列 + 独立 writer task，避免慢消费者堵住设备读取循环。
+
+    role=live（缺省，兼容旧前端）：计入监听人数、参与 0->1 / 1->0 判定、接收实时 PCM；
+    role=control                ：只用于控制类消息（录音列表/回放等），不计人数、不推 PCM。
+    sid：客户端会话 id。同一 device_id 下同 sid 出现新连接时，旧条目会被踢掉，
+         避免"页面重连/刷新"残留旧连接把人数虚增（幽灵监听者）。
+    """
+
+    __slots__ = ("ws", "queue", "task", "dropped", "role", "sid", "last_active",
+                 "fail_sends")
     _QUEUE_MAX = 100  # 约 2 秒 @100Hz(20ms) 实时帧
 
-    def __init__(self, ws):
+    def __init__(self, ws, role: str = "live", sid: str | None = None):
         self.ws = ws
         self.queue = asyncio.Queue(maxsize=self._QUEUE_MAX)
         self.task = None
         self.dropped = 0
+        self.role = role
+        self.sid = sid
+        self.last_active = P.now_ms()
+        self.fail_sends = 0
+
+    @property
+    def is_live(self) -> bool:
+        """是否计入人数（只有 live 参与人数统计与 0->1/1->0 判定）。"""
+        return self.role != "control"
 
 
 class Hub:
@@ -75,6 +107,9 @@ class Hub:
     # 监听者 1->0 后延迟多久再给设备下发 stop_stream（秒）。
     # 期内若又有监听者接入则取消停流，避免刷新页面就掐断设备推流。
     LISTENER_STOP_DELAY_S = 10.0
+    # 监听者空闲回收阈值（毫秒）：超过该时长既无任何上行交互、又有发送失败记录的
+    # 监听连接，判定为"半开/死链"由 sweeper 主动关掉并从集合移除（P0-4）。
+    LISTENER_IDLE_MS = 90_000
 
     def __init__(self):
         self.devices: dict[str, _Device] = {}
@@ -94,13 +129,25 @@ class Hub:
         return self._id_counter
 
     async def send_json_to_device(self, device_id: str, obj: _JSON) -> bool:
+        """向该设备当前的 WS 连接下发一条 JSON（命令/请求）。
+
+        成功与失败都会打日志（P0-2）：这条路径以前是"静默失败"的黑洞——
+        一旦 self.devices 里没有该设备（例如注册被旧连接误删），start_stream /
+        stop_stream / 配置 / 回放全部静默失效，而心跳照发、/api/devices 仍显示在线，
+        线上无从排查。
+        """
         dev = self.devices.get(device_id)
         if dev is None:
+            log.warning("cmd send FAILED: device=%s cmd=%s reason=device_not_registered",
+                        device_id, _cmd_of(obj))
             return False
         try:
             await dev.ws.send_json(obj)
+            log.info("cmd sent: device=%s cmd=%s", device_id, _cmd_of(obj))
             return True
-        except Exception:
+        except Exception as exc:
+            log.warning("cmd send FAILED: device=%s cmd=%s reason=%s: %s",
+                        device_id, _cmd_of(obj), type(exc).__name__, exc)
             return False
 
     async def send_json_to_listener(self, ws, obj: _JSON):
