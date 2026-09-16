@@ -307,6 +307,17 @@ class Hub:
             sd_ok=bool(msg.get("sd_ok", True)),
             config=msg.get("config") or {},
         )
+        # 同一 device_id 的新连接"取代"旧连接：先把旧连接标记为 replaced 并尽力关闭，
+        # 再写入新注册。旧连接稍后的收尾会在 _device_gone 里因身份不匹配被忽略，
+        # 不会误删这条新注册（否则所有下行命令都会静默失效）。
+        old = self.devices.get(device_id)
+        if old is not None and old.ws is not ws:
+            old.replaced = True
+            log.info("device re-registered: device=%s supersedes stale socket", device_id)
+            try:
+                await old.ws.close()
+            except Exception:
+                pass  # 关不掉不致命：它的收尾已被身份校验拦住
         self.devices[device_id] = dev
         # 设备回来了：清除掉线宽限期标记（若有），避免宽限期结束后再误触发 offline
         self.reservations.pop(device_id, None)
@@ -358,7 +369,7 @@ class Hub:
         finally:
             if "hb_task" in locals():
                 hb_task.cancel()
-            await self._device_gone(device_id, reason=gone_reason)
+            await self._device_gone(device_id, ws, reason=gone_reason)
 
     async def _on_device_text(self, device_id: str, text: str):
         try:
@@ -398,10 +409,20 @@ class Hub:
                     listener_ws, P.rewrite_req_id(frame, orig_id)
                 )
 
-    async def _device_gone(self, device_id: str, reason: str = "read_loop_end"):
-        dev = self.devices.pop(device_id, None)
-        if dev is None:
+    async def _device_gone(self, device_id: str, ws, reason: str = "read_loop_end"):
+        """设备连接断开时的收尾（带连接身份校验）。
+
+        只有"当前注册对应的就是这条断掉的 ws"时才执行清理；否则说明这是被新连接
+        取代的旧 socket（或设备已不在册）的迟到收尾，直接忽略——绝不允许它按
+        device_id 无条件 pop 掉别人的注册。
+        """
+        dev = self.devices.get(device_id)
+        if dev is None or dev.ws is not ws:
+            log.info("stale device socket gone, ignored: device_id=%s reason=%s registered=%s",
+                     device_id, reason,
+                     "none" if dev is None else "another_socket")
             return
+        self.devices.pop(device_id, None)
         log.info("device disconnect: device_id=%s reason=%s last_seen_age=%.1fs "
                  "entering %ds reconnect grace",
                  device_id, reason, (P.now_ms() - dev.last_seen) / 1000.0,
@@ -452,7 +473,11 @@ class Hub:
         if was_empty:
             # 0 -> 1：取消可能正在计时的"延迟停流"，并通知设备开流
             self._cancel_stop_timer(device_id)
-            await self.send_json_to_device(device_id, {"type": "cmd", "cmd": "start_stream"})
+            log.info("listeners 0->1: device=%s count=%d cmd=start_stream",
+                     device_id, len(bucket))
+            ok = await self.send_json_to_device(device_id, {"type": "cmd", "cmd": "start_stream"})
+            log.info("listeners 0->1: device=%s count=%d cmd=start_stream delivered=%s",
+                     device_id, len(bucket), ok)
             await self.broadcast_event(device_id, {
                 "type": "event", "event": P.EV_STREAM_STATE,
                 "device_id": device_id, "state": "streaming",
@@ -478,6 +503,8 @@ class Hub:
                 self.listeners.pop(device_id, None)
                 # 1 -> 0：不立即停流，延迟 LISTENER_STOP_DELAY_S 秒再停；
                 # 期内若有监听者回来则取消（见 _delayed_stop）
+                log.info("listeners 1->0: device=%s count=0 schedule stop_stream in %.0fs",
+                         device_id, self.LISTENER_STOP_DELAY_S)
                 self._schedule_stop(device_id)
 
     def _cancel_stop_timer(self, device_id: str):
