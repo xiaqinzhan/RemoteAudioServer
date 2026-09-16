@@ -107,9 +107,13 @@ class Hub:
     # 监听者 1->0 后延迟多久再给设备下发 stop_stream（秒）。
     # 期内若又有监听者接入则取消停流，避免刷新页面就掐断设备推流。
     LISTENER_STOP_DELAY_S = 10.0
-    # 监听者空闲回收阈值（毫秒）：超过该时长既无任何上行交互、又有发送失败记录的
-    # 监听连接，判定为"半开/死链"由 sweeper 主动关掉并从集合移除（P0-4）。
+    # 监听者空闲回收阈值（毫秒）：超过该时长没有任何一次成功发送，判定为"半开/死链"
+    # 由 sweeper 主动关掉并从集合移除（P0-4）。
+    # 注意：心跳每 HEARTBEAT_INTERVAL(20s) 成功发送一次会刷新活跃度，所以"正常但空闲"
+    # 的连接（例如只翻录音列表的控制连接）不会被误杀。
     LISTENER_IDLE_MS = 90_000
+    # 监听连接连续发送失败次数阈值：达到即判定死链，由 sweeper 回收（P0-4）。
+    LISTENER_FAIL_SENDS_MAX = 5
 
     def __init__(self):
         self.devices: dict[str, _Device] = {}
@@ -162,7 +166,8 @@ class Hub:
             pass
 
     async def _heartbeat_loop(self, ws, label: str, device_id: str | None = None,
-                              listeners_device_id: str | None = None):
+                              listeners_device_id: str | None = None,
+                              ln: _Listener | None = None):
         """每 HEARTBEAT_INTERVAL 秒下发一条应用层心跳，保证过长连接不被平台网关切断。
 
         只新增消息类型 {"type":"hb","ts":..,"listeners":N}：无 cmd 字段，老固件/老前端
@@ -172,6 +177,8 @@ class Hub:
         发送失败说明连接已死，直接收尾返回，由对端主读取循环走既有清理路径，不抛异常。
         对设备连接（device_id 非空）顺带刷新共享状态里的 last_seen，保证多实例下
         /api/devices 不会因为设备静默（无上行帧）而被误判离线。
+        ln 非空表示这条心跳挂在某个监听连接上：发送成功刷新其活跃度，失败则关闭连接并
+        走统一清理（半开连接的 receive() 可能永远不返回，只能靠这条兜底把名额释放）。
         """
         try:
             while True:
@@ -184,9 +191,23 @@ class Hub:
                     await ws.send_json(hb)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    log.debug("[hb] %s send failed, stop heartbeat", label)
+                except Exception as exc:
+                    if ln is not None:
+                        self._fail_listener(ln)
+                        log.warning("[hb] %s send failed (%s), reclaiming listener device=%s",
+                                    label, type(exc).__name__, target)
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                        if target is not None:
+                            await self._drop_listener(target, ln,
+                                                      reason="heartbeat_send_failed")
+                    else:
+                        log.debug("[hb] %s send failed, stop heartbeat", label)
                     return
+                if ln is not None:
+                    self._touch_listener(ln)
                 if device_id is not None:
                     # 连接仍然活着：刷新共享状态的时间戳（失败不影响心跳）
                     await presence.touch(device_id, P.now_ms())
@@ -243,6 +264,55 @@ class Hub:
     _BACKPRESSURE_HIGH = 128 * 1024
     _BACKPRESSURE_LOW = 16 * 1024
 
+    # ------------------------------------------------------------------
+    # 监听者清理（统一入口，幂等）
+    # ------------------------------------------------------------------
+    def _touch_listener(self, ln: _Listener):
+        """记录一次成功发送 / 一次上行交互：刷新活跃时间并清零失败计数。"""
+        ln.last_active = P.now_ms()
+        ln.fail_sends = 0
+
+    def _fail_listener(self, ln: _Listener):
+        """记录一次发送失败：供 sweeper 判定死链。"""
+        ln.fail_sends += 1
+
+    async def _drop_listener(self, device_id: str, ln: _Listener,
+                             reason: str = "unknown") -> bool:
+        """把监听条目从它所属的集合移除（**幂等**）。
+
+        这是监听者清理的唯一入口，所有触发点（主读取循环收尾 / 心跳发送失败 /
+        写入失败踢慢消费者 / sweeper 回收）都调用它：
+          - live：从 self.listeners 移除；集合变空时按既有规则打日志 + 延迟停流（1->0）；
+          - control：只从 self.control_listeners 摘除，不参与 1->0 判定。
+        幂等：条目已不在集合里就直接返回 False，避免同一条目被多路重复清理而把
+        1->0 停流计时反复重置（那会让设备永远收不到 stop_stream）。
+        返回 True 表示本次真的移除了。
+        """
+        table = self.listeners if ln.is_live else self.control_listeners
+        bucket = table.get(device_id)
+        if bucket is None or ln not in bucket:
+            return False  # 已被其它路径清理过（或从未入册）
+        bucket.discard(ln)
+        cur = asyncio.current_task()
+        if ln.task is not None and ln.task is not cur:
+            ln.task.cancel()  # 自己就是 writer 时不 cancel 自己
+        if not bucket:
+            table.pop(device_id, None)
+        if ln.is_live:
+            remain = len(self.listeners.get(device_id, ()))
+            if remain:
+                log.info("listener dropped: device=%s reason=%s count=%d",
+                         device_id, reason, remain)
+            else:
+                # 1 -> 0：不立即停流，延迟 LISTENER_STOP_DELAY_S 秒再停；
+                # 期内若有监听者回来则取消（见 _delayed_stop）
+                log.info("listeners 1->0: device=%s count=0 reason=%s schedule stop_stream in %.0fs",
+                         device_id, reason, self.LISTENER_STOP_DELAY_S)
+                self._schedule_stop(device_id)
+        else:
+            log.info("control listener dropped: device=%s reason=%s", device_id, reason)
+        return True
+
     async def _listener_writer(self, device_id: str, ln: _Listener):
         """把监听者队列里的帧逐个发给对端。
 
@@ -256,8 +326,12 @@ class Hub:
                 frame = await ln.queue.get()
                 try:
                     await ln.ws.send_bytes(frame)
+                    self._touch_listener(ln)
                     await self._await_listener_backpressure(ln)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
+                    self._fail_listener(ln)
                     log.warning(
                         "slow/failed consumer kicked: device=%s listener=%r err=%r dropped=%d",
                         device_id, ln.ws, type(exc).__name__, ln.dropped,
@@ -266,6 +340,9 @@ class Hub:
                         await ln.ws.close()
                     except Exception:
                         pass
+                    # 立即移出集合：不能只关连接等 finally，否则在该任务被取消 /
+                    # 读取循环已挂住的情况下条目会残留，人数虚高。
+                    await self._drop_listener(device_id, ln, reason="writer_failed")
                     return
         except asyncio.CancelledError:
             raise
@@ -514,7 +591,8 @@ class Hub:
             cbucket.add(ln)
             log.info("control listener attached (not counted): device=%s", device_id)
         hb_task = asyncio.get_running_loop().create_task(
-            self._heartbeat_loop(ws, f"listen:{device_id}"))
+            self._heartbeat_loop(ws, f"listen:{device_id}",
+                                 listeners_device_id=device_id, ln=ln))
         if was_empty:
             # 0 -> 1：取消可能正在计时的"延迟停流"，并通知设备开流
             self._cancel_stop_timer(device_id)
@@ -533,6 +611,7 @@ class Hub:
             while True:
                 message = await ws.receive()
                 if "text" in message:
+                    self._touch_listener(ln)  # 有上行交互即视为活着
                     await self._on_listener_text(device_id, ws, message["text"])
                 elif message.get("type") == "websocket.disconnect":
                     break
@@ -540,24 +619,9 @@ class Hub:
             pass
         finally:
             hb_task.cancel()
-            # 取消 writer task 并回收队列，防止任务/内存泄漏
-            if ln.task is not None:
-                ln.task.cancel()
-            # control 连接不在人数集合里，不参与 1->0 判定（也不吞掉 CancelledError）；
-            # 只需从 control 注册表里摘掉，避免残留引用。
-            if ln.is_live:
-                bucket.discard(ln)
-                if not bucket:
-                    self.listeners.pop(device_id, None)
-                    # 1 -> 0：不立即停流，延迟 LISTENER_STOP_DELAY_S 秒再停；
-                    # 期内若有监听者回来则取消（见 _delayed_stop）
-                    log.info("listeners 1->0: device=%s count=0 schedule stop_stream in %.0fs",
-                             device_id, self.LISTENER_STOP_DELAY_S)
-                    self._schedule_stop(device_id)
-            else:
-                cbucket.discard(ln)
-                if not cbucket:
-                    self.control_listeners.pop(device_id, None)
+            # 统一清理（幂等）：cancel writer + 按角色从对应集合移除，
+            # live 集合变空才按 1->0 规则延迟停流。多路触发也只生效一次。
+            await self._drop_listener(device_id, ln, reason="ws_closed")
 
     def _cancel_stop_timer(self, device_id: str):
         t = self._stop_timers.pop(device_id, None)
@@ -670,8 +734,41 @@ class Hub:
 
         return list(items.values())
 
+    def _reclaim_reason(self, ln: _Listener, now: float) -> str | None:
+        """死链判定：返回回收原因，None 表示保留该连接。
+
+        判据一：连续发送失败达阈值（心跳/写入都在失败）；
+        判据二：距上次成功发送超过 LISTENER_IDLE_MS（心跳每 20s 会刷新活跃度，
+                所以正常空闲连接不会命中这里）。
+        """
+        if ln.fail_sends >= self.LISTENER_FAIL_SENDS_MAX:
+            return f"{ln.role}_send_failed_x{ln.fail_sends}"
+        idle_ms = now - ln.last_active
+        if idle_ms > self.LISTENER_IDLE_MS:
+            return f"{ln.role}_idle_{idle_ms / 1000:.0f}s_no_success_send"
+        return None
+
+    async def _sweep_listeners(self, now: float):
+        """巡检 live 与 control 两张监听表，回收死链连接（幂等清理 + 关连接）。"""
+        for table in (self.listeners, self.control_listeners):
+            for device_id, bucket in list(table.items()):
+                for ln in list(bucket):
+                    reason = self._reclaim_reason(ln, now)
+                    if reason is None:
+                        continue
+                    log.warning(
+                        "listener reclaimed: device=%s role=%s reason=%s idle=%.0fs fails=%d",
+                        device_id, ln.role, reason, (now - ln.last_active) / 1000.0,
+                        ln.fail_sends,
+                    )
+                    try:
+                        await ln.ws.close(code=1001)
+                    except Exception:
+                        pass
+                    await self._drop_listener(device_id, ln, reason=reason)
+
     async def sweeper(self):
-        """定期巡检：超过 45s 无消息的设备强制下线。"""
+        """定期巡检：超时设备强制下线 + 死链监听连接回收。"""
         while True:
             await asyncio.sleep(10)
             now = P.now_ms()
@@ -684,6 +781,9 @@ class Hub:
                         await dev.ws.close(code=1001)
                     except Exception:
                         pass
+            # 死链监听连接回收：TCP 半开（页面/网络已断但没发 close 帧）时 receive()
+            # 可能永远不返回、finally 也就永不执行，条目会永久占着"监听人数"。
+            await self._sweep_listeners(now)
             # 设备重连宽限期到期：仍没回来才真正 device_offline 并清理
             for device_id, deadline in list(self.reservations.items()):
                 if now >= deadline:
