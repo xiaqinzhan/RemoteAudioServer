@@ -1,0 +1,20 @@
+# Gradle / Android 构建产物（不要提交）
+.gradle/
+build/
+/app/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# 产物
+*.apk
+*.aab
+*.ap_
+*.dex

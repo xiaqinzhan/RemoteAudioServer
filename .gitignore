@@ -47,6 +47,9 @@ bin/
 Thumbs.db
 ehthumbs.db
 
+# 临时分发的构建产物（如 Android debug APK，不入库）
+/server/static/downloads/
+
 # Logs
 output.log
 *.log
