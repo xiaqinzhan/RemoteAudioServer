@@ -22,8 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String DEFAULT_SERVER =
-            "https://ad143af7-ddd7-4630-b71b-ffe68ff5a6bf.dev.coze.site";
+    private static final String DEFAULT_SERVER = "https://remoteaudio.coze.site";
 
     private EditText etServer;
     private TextView tvStatus, tvCurDevice, tvStreamState, tvRecEmpty;
@@ -39,12 +38,14 @@ public class MainActivity extends AppCompatActivity {
     private final List<Recording> recordings = new ArrayList<>();
 
     private ApiClient api;
-    private ListenSession session;
+    private ListenSession ctlSession;    // role=control：选中设备后常驻，负责录音列表/回放/录音开关/事件
+    private ListenSession liveSession;   // role=live：只在「开始监听」期间存在，接收实时 PCM
     private PcmPlayer pcmPlayer;
     private OpusPlayer opusPlayer;
 
     private String base;
     private String curDeviceId;
+    private String clientSid;
     private boolean liveOn = false;
     private int playingPos = -1;
     private long playingReqId = -1;
@@ -76,6 +77,7 @@ public class MainActivity extends AppCompatActivity {
         etServer.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
 
         api = new ApiClient();
+        clientSid = ApiClient.clientSid(this);
         pcmPlayer = new PcmPlayer();
         opusPlayer = new OpusPlayer();
 
@@ -118,8 +120,8 @@ public class MainActivity extends AppCompatActivity {
         btnListen.setOnClickListener(v -> toggleLive());
         btnRefreshRec.setOnClickListener(v -> requestRecordings());
         swRec.setOnClickListener(v -> {
-            if (session != null && curDeviceId != null) {
-                session.setRecording(nextReqId(), swRec.isChecked());
+            if (ctlSession != null && curDeviceId != null) {
+                ctlSession.setRecording(nextReqId(), swRec.isChecked());
                 toast("已发送录音开关: " + (swRec.isChecked() ? "开" : "关"));
             }
         });
@@ -190,14 +192,14 @@ public class MainActivity extends AppCompatActivity {
         ui.postDelayed(pollTask, 5000);
     }
 
-    // ---- 选择设备：开监听会话 ----
+    // ---- 选择设备：开控制会话（role=control，不计监听人数） ----
 
     private void pickDevice(DeviceInfo d) {
         if (!d.online) {
             toast("设备离线，无法监听");
             return;
         }
-        if (d.deviceId.equals(curDeviceId) && session != null) {
+        if (d.deviceId.equals(curDeviceId) && ctlSession != null) {
             deviceAdapter.setSelected(curDeviceId);
             return;
         }
@@ -213,8 +215,12 @@ public class MainActivity extends AppCompatActivity {
         tvRecEmpty.setVisibility(View.VISIBLE);
         tvRecEmpty.setText("加载录音中…");
 
-        session = new ListenSession();
-        session.connect(ApiClient.listenWsUrl(base, d.deviceId), new ListenSession.Callback() {
+        // role=control：只用于录音列表/回放/录音开关与事件；不计入服务端「监听人数」，
+        // 因此只是打开 App 选中设备不会触发设备推流。它自己的请求响应与 0x02 文件块
+        // 仍按 req_id 直投回来，不影响列表与回放。
+        ctlSession = new ListenSession();
+        ctlSession.connect(ApiClient.listenWsUrl(base, d.deviceId, "control", null),
+                new ListenSession.Callback() {
             @Override public void onOpen() {
                 ui.post(() -> tvStreamState.setText("已连接，可开始监听"));
                 requestRecordings();
@@ -256,13 +262,13 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
             @Override public void onPcmFrame(byte[] pcm) {
-                if (liveOn && pcmPlayer != null) pcmPlayer.enqueue(pcm);
+                // control 会话服务端不会推实时 PCM；实时音频走 liveSession
             }
         });
     }
 
     private void requestRecordings() {
-        if (session != null) session.listRecordings(nextReqId());
+        if (ctlSession != null) ctlSession.listRecordings(nextReqId());
     }
 
     // ---- 实时监听开关 ----
@@ -276,7 +282,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startLive() {
-        if (session == null) { toast("请先选择设备"); return; }
+        if (ctlSession == null) { toast("请先选择设备"); return; }
         opusPlayer.stop();           // 单一音源：停回放
         playingPos = -1;
         recordingAdapter.setPlaying(-1);
@@ -286,6 +292,36 @@ public class MainActivity extends AppCompatActivity {
         btnListen.setBackgroundResource(R.drawable.btn_stop);
         btnListen.setTextColor(0xFFFFFFFF);
         tvStreamState.setText("实时监听中…");
+        openLiveSession();           // 从这一刻起才建立"真监听"连接、才计入服务端人数
+    }
+
+    /**
+     * 建立"真监听"会话（role=live&sid=…）：服务端只对 role=live 的连接推实时 PCM、
+     * 并把它计入监听人数（0→1 时下发 start_stream 让设备开始推流）。
+     */
+    private void openLiveSession() {
+        if (liveSession != null || base == null || curDeviceId == null) return;
+        liveSession = new ListenSession();
+        liveSession.connect(ApiClient.listenWsUrl(base, curDeviceId, "live", clientSid),
+                new ListenSession.Callback() {
+            @Override public void onOpen() {
+                ui.post(() -> { if (liveOn) tvStreamState.setText("实时监听中…"); });
+            }
+            @Override public void onClosed(String reason) { }
+            @Override public void onFailure(String msg) {
+                ui.post(() -> {
+                    toast("实时监听连接失败: " + msg);
+                    stopLive();
+                });
+            }
+            @Override public void onRecordings(List<Recording> files) { }
+            @Override public void onStreamState(boolean streaming) { }
+            @Override public void onRecordingEvent(String file) { }
+            @Override public void onFileComplete(long reqId, byte[] data, String hintName) { }
+            @Override public void onPcmFrame(byte[] pcm) {
+                if (liveOn && pcmPlayer != null) pcmPlayer.enqueue(pcm);
+            }
+        });
     }
 
     private void stopLive() {
@@ -295,6 +331,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void stopLiveOnly() {
         liveOn = false;
+        closeLiveSession();
         pcmPlayer.stop();
         pbLevel.setProgress(0);
         btnListen.setText(R.string.start_listen);
@@ -302,14 +339,22 @@ public class MainActivity extends AppCompatActivity {
         btnListen.setTextColor(0xFF06202A);
     }
 
+    /** 关闭"真监听"会话：服务端随之把该设备监听人数减 1（1→0 时延迟 10s 停流）。 */
+    private void closeLiveSession() {
+        if (liveSession != null) {
+            liveSession.close();
+            liveSession = null;
+        }
+    }
+
     // ---- 录音回放 ----
 
     private void onRecordingClicked(Recording r, int position) {
-        if (session == null) { toast("请先选择设备"); return; }
+        if (ctlSession == null) { toast("请先选择设备"); return; }
         if (position == playingPos) {
             // 再次点击 = 停止回放
             opusPlayer.stop();
-            if (playingReqId >= 0) session.stopFile(playingReqId);
+            if (playingReqId >= 0) ctlSession.stopFile(playingReqId);
             playingPos = -1;
             playingReqId = -1;
             recordingAdapter.setPlaying(-1);
@@ -321,15 +366,16 @@ public class MainActivity extends AppCompatActivity {
         playingReqId = nextReqId();
         recordingAdapter.setPlaying(position);
         tvStreamState.setText("获取录音…");
-        session.playFile(playingReqId, r.name);
+        ctlSession.playFile(playingReqId, r.name);
     }
 
     private void teardownSession() {
-        stopLiveOnly();
+        stopLiveOnly();              // 内含关闭 liveSession
         opusPlayer.stop();
-        if (session != null) {
-            session.close();
-            session = null;
+        closeLiveSession();
+        if (ctlSession != null) {
+            ctlSession.close();
+            ctlSession = null;
         }
         liveOn = false;
         playingPos = -1;

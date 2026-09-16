@@ -1,11 +1,15 @@
 package com.example.audiomonitor;
 
+import android.content.Context;
+import android.content.SharedPreferences;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
@@ -33,10 +37,43 @@ public class ApiClient {
         return s;
     }
 
-    /** http(s) -> ws(s)，拼出设备监听 WebSocket 地址。 */
-    public static String listenWsUrl(String base, String deviceId) {
+    /**
+     * http(s) -> ws(s)，拼出监听 WebSocket 地址。
+     *
+     * role=live    真监听：计入服务端监听人数、触发设备推流、接收实时 PCM；
+     * role=control 控制类会话：只收发录音列表/回放/录音开关/事件，不计人数、不推实时 PCM
+     *              （但它自己请求的响应与文件块照常返回，服务端按 req_id 直投）。
+     * sid 传 {@link #clientSid}(context)：同一客户端会话重连时服务端会用新连接替换旧条目，
+     * 避免旧连接残留导致"监听人数"虚高、真实监听者拿不到开流指令。
+     */
+    public static String listenWsUrl(String base, String deviceId, String role, String sid) {
         String ws = base.replace("https://", "wss://").replace("http://", "ws://");
-        return ws + "/ws/listen/" + deviceId;
+        StringBuilder sb = new StringBuilder(ws)
+                .append("/ws/listen/").append(urlEncode(deviceId))
+                .append("?role=").append(urlEncode(role));
+        if (sid != null && !sid.isEmpty()) {
+            sb.append("&sid=").append(urlEncode(sid));
+        }
+        return sb.toString();
+    }
+
+    private static String urlEncode(String s) {
+        try {
+            return java.net.URLEncoder.encode(s, "UTF-8");
+        } catch (Exception e) {
+            return s;
+        }
+    }
+
+    /** 客户端会话 id：首次生成随机 UUID 后持久化，重连/重启保持稳定。 */
+    public static String clientSid(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences("audio_monitor", Context.MODE_PRIVATE);
+        String sid = sp.getString("client_sid", null);
+        if (sid == null || sid.isEmpty()) {
+            sid = UUID.randomUUID().toString();
+            sp.edit().putString("client_sid", sid).apply();
+        }
+        return sid;
     }
 
     /** 拉取设备列表。失败抛 IOException。 */
