@@ -62,6 +62,33 @@ android_client/
    ./gradlew installDebug      # Windows: gradlew.bat installDebug
    ```
 
+> 仓库里只有 `gradle/wrapper/gradle-wrapper.properties`，没有 `gradlew` / `gradlew.bat` / `gradle-wrapper.jar`
+> （沙箱内无法生成二进制）。用命令行构建时先在项目目录生成一次 wrapper：
+>
+> ```bash
+> gradle wrapper --gradle-version 8.7   # 需要本机已装 Gradle 8.7+
+> ./gradlew installDebug                # 之后即可用 wrapper 构建
+> ```
+>
+> 用 Android Studio 打开则会自动同步，可忽略这一步。
+
+### 常见报错：`Plugin [id: 'com.android.application', version: '8.5.2'] was not found …`
+
+这不是本项目代码问题，而是 **Gradle 没能取到 AGP 的 plugin marker**。该 marker 只发布在 **Google Maven**
+（`https://dl.google.com/dl/android/maven2/`，路径
+`com/android/application/com.android.application.gradle.plugin/8.5.2/…pom`，可正常访问时返回 200），
+Maven Central 与 Gradle Plugin Portal 里都没有。所以「搜过 Google / MavenRepo / Gradle Central Plugin Repository 但没找到」
+通常意味着 Google Maven 实际没取到。按下面顺序排查：
+
+1. **全局镜像脚本改写了仓库 URL**（最常见）：检查 `~/.gradle/init.gradle`、`~/.gradle/init.d/*.gradle`
+   （Windows：`C:\Users\<你>\.gradle\init.gradle`）。若它把 `google()` 换成了缺 AGP 的第三方镜像，
+   报错里的仓库名仍显示 `Google`，但拿到的其实是空结果——临时改名/删除该脚本再同步。
+2. **网络直连不了 `dl.google.com`**：本项目 `settings.gradle` 已把**阿里云镜像放在官方源之前**
+   （`gradle-plugin` / `google` / `public`），同步即可命中；`gradle/wrapper/gradle-wrapper.properties`
+   的 `distributionUrl` 也已改为腾讯云镜像下载 Gradle 8.7。
+3. **Gradle 版本过旧或开了离线模式**：`gradle --version` 需 **≥ 8.7**（AGP 8.5.2 的最低要求）；
+   并确认 IDE 里没有勾选 *Offline work*（`--offline` 时未缓存的插件一律报「not found」）。
+
 ## 4. 连接云端服务器
 
 App 启动后服务器地址栏已默认填好云端地址：

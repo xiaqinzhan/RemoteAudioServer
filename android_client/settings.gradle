@@ -1,5 +1,13 @@
 pluginManagement {
     repositories {
+        // 国内镜像优先。
+        // AGP 的 plugin marker（com.android.application.gradle.plugin）只发布在 Google Maven，
+        // 直连 dl.google.com 常因网络拦截/超时/被镜像脚本改写而报：
+        //   Plugin [id: 'com.android.application', version: '8.5.2'] was not found in any of the following sources
+        // 先试镜像可避免这个问题（镜像里没有时会自动回落到下面的官方源）。
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -8,6 +16,8 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
         google()
         mavenCentral()
     }
