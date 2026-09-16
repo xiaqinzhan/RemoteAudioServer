@@ -114,8 +114,20 @@ async def ws_device(ws: WebSocket, device_id: str):
 
 @app.websocket("/ws/listen/{device_id}")
 async def ws_listen(ws: WebSocket, device_id: str):
+    """监听端 WS。
+
+    查询参数：
+      ?role=live|control  默认 live（兼容旧前端）。只有 live 计入"监听人数"、
+                          参与 0→1 开流 / 1→0 延迟停流、接收实时 PCM；
+                          control 只用于控制类消息（录音列表/回放），不计人数、不推 PCM。
+      ?sid=<客户端会话 id> 同一 device_id 下同 sid 的新连接会替换旧连接，避免重连残留虚增人数。
+    """
     await ws.accept()
-    await hub.handle_listener(device_id, ws)
+    role = (ws.query_params.get("role") or "live").strip().lower()
+    if role not in ("live", "control"):
+        role = "live"  # 未知取值按 live 处理，兼容旧前端
+    sid = (ws.query_params.get("sid") or "").strip() or None
+    await hub.handle_listener(device_id, ws, role=role, sid=sid)
 
 
 # 静态资源（在 API / WS 路由之后挂载，避免覆盖）

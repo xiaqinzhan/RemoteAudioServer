@@ -113,7 +113,12 @@ class Hub:
 
     def __init__(self):
         self.devices: dict[str, _Device] = {}
-        self.listeners: dict[str, set] = {}          # device_id -> {listener _Listener}
+        # device_id -> {真·监听者 _Listener}：只有 role=live 的连接在此，是"监听人数"
+        # 与 0->1/1->0 判定的唯一数据源，也是 fanout_live 的推送目标。
+        self.listeners: dict[str, set] = {}
+        # device_id -> {role=control 的连接}：只收发控制类消息（录音列表/回放）与设备事件，
+        # 不计人数、不推实时 PCM。单独一张表是为了不破坏"人数"语义。
+        self.control_listeners: dict[str, set] = {}
         self.pending: dict[int, tuple] = {}          # internal_id -> (device_id, listener_ws, orig_req_id)
         # 设备掉线进入重连宽限期的截止时间(ms)：device_id -> deadline
         self.reservations: dict[str, float] = {}
@@ -198,7 +203,14 @@ class Hub:
             pass
 
     async def broadcast_event(self, device_id: str, obj: _JSON):
+        """设备事件广播给 live 与 control 连接。
+
+        live 是监听页主连接；control 只是"不实时听音"，它仍需要 recording_saved
+        之类的事件来刷新录音列表，所以事件照发（事件与实时 PCM 是两条路径）。
+        """
         for ln in list(self.listeners.get(device_id, ())):
+            await self.send_json_to_listener(ln.ws, obj)
+        for ln in list(self.control_listeners.get(device_id, ())):
             await self.send_json_to_listener(ln.ws, obj)
 
     def fanout_live(self, device_id: str, frame: bytes):
@@ -462,12 +474,45 @@ class Hub:
     # ------------------------------------------------------------------
     # 监听者接入
     # ------------------------------------------------------------------
-    async def handle_listener(self, device_id: str, ws):
-        bucket = self.listeners.setdefault(device_id, set())
-        was_empty = not bucket
-        ln = _Listener(ws)
-        bucket.add(ln)
-        ln.task = asyncio.get_running_loop().create_task(self._listener_writer(device_id, ln))
+    async def handle_listener(self, device_id: str, ws, role: str = "live",
+                              sid: str | None = None):
+        """监听端连接。
+
+        role=live（缺省，兼容旧前端）：计入 self.listeners[device_id] 人数，参与
+          0→1 开流 / 1→0 延迟停流，并接收 fanout_live 推送的实时 PCM。
+        role=control：不计人数、不参与 0→1/1→0、不进 fanout 集合（因此不推 PCM）。
+          它自己发起的请求（录音列表/回放等）响应不经集合，而是按 pending 里的
+          listener_ws 直接写回它这条 WS（见 _on_device_text / _on_device_binary /
+          send_binary_to_listener），所以控制连接照常能收到自己的响应。
+        sid：同 device_id 下同 sid 的旧 live 连接会被踢掉并移出集合，避免
+          "页面刷新/重连"残留旧连接把人数虚增（幽灵监听者）。
+        """
+        ln = _Listener(ws, role=role, sid=sid)
+        bucket = self.listeners.setdefault(device_id, set()) if ln.is_live else None
+        cbucket = None if ln.is_live else self.control_listeners.setdefault(device_id, set())
+        # 0->1 判定看"这次替换之前是否已有 live 听者"：同 sid 重连属于同一听众的延续，
+        # 既不该多下发一次 start_stream，也不该触发 1->0 停流抖动。
+        had_live = bool(bucket)
+
+        if bucket is not None and sid:
+            for old in [o for o in bucket if o.sid == sid]:
+                bucket.discard(old)
+                if old.task is not None:
+                    old.task.cancel()
+                log.info("listener replaced (same sid): device=%s sid=%s", device_id, sid)
+                try:
+                    await old.ws.close()
+                except Exception:
+                    pass  # 关不掉不致命：它已不在集合里，不再计入人数
+
+        was_empty = bucket is not None and not had_live
+        if bucket is not None:
+            bucket.add(ln)
+            ln.task = asyncio.get_running_loop().create_task(
+                self._listener_writer(device_id, ln))
+        else:
+            cbucket.add(ln)
+            log.info("control listener attached (not counted): device=%s", device_id)
         hb_task = asyncio.get_running_loop().create_task(
             self._heartbeat_loop(ws, f"listen:{device_id}"))
         if was_empty:
@@ -498,14 +543,21 @@ class Hub:
             # 取消 writer task 并回收队列，防止任务/内存泄漏
             if ln.task is not None:
                 ln.task.cancel()
-            bucket.discard(ln)
-            if not bucket:
-                self.listeners.pop(device_id, None)
-                # 1 -> 0：不立即停流，延迟 LISTENER_STOP_DELAY_S 秒再停；
-                # 期内若有监听者回来则取消（见 _delayed_stop）
-                log.info("listeners 1->0: device=%s count=0 schedule stop_stream in %.0fs",
-                         device_id, self.LISTENER_STOP_DELAY_S)
-                self._schedule_stop(device_id)
+            # control 连接不在人数集合里，不参与 1->0 判定（也不吞掉 CancelledError）；
+            # 只需从 control 注册表里摘掉，避免残留引用。
+            if ln.is_live:
+                bucket.discard(ln)
+                if not bucket:
+                    self.listeners.pop(device_id, None)
+                    # 1 -> 0：不立即停流，延迟 LISTENER_STOP_DELAY_S 秒再停；
+                    # 期内若有监听者回来则取消（见 _delayed_stop）
+                    log.info("listeners 1->0: device=%s count=0 schedule stop_stream in %.0fs",
+                             device_id, self.LISTENER_STOP_DELAY_S)
+                    self._schedule_stop(device_id)
+            else:
+                cbucket.discard(ln)
+                if not cbucket:
+                    self.control_listeners.pop(device_id, None)
 
     def _cancel_stop_timer(self, device_id: str):
         t = self._stop_timers.pop(device_id, None)
